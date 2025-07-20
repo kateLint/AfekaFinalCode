@@ -1,0 +1,10 @@
+pandas
+numpy
+torch
+transformers>=4.25.1
+sentence-transformers
+scikit-learn
+joblib
+optuna
+nltk
+keybert
