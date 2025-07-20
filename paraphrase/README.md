@@ -95,6 +95,42 @@ All trials filtered by coherence threshold (default: 0.6).
 - [ ] Extend to pledged ratio prediction
 - [ ] Add support for Hebrew translation/analysis
 
+
+---
+
+## 🔢 Example Input and Output
+
+### 📝 Input (Python dictionary format)
+
+```python
+project_input = {
+    "goal": 131421,
+    "rewardscount": 6,
+    "projectFAQsCount": 8,
+    "project_length_days": 30,
+    "preparation_days": 5,
+    "category_Web_Development": 1,
+    "story": "Innovative Device is an ambitious project aimed at revolutionizing the Gadgets industry...",
+    "risks": "Launching Innovative Device in the field of Gadgets comes with its own set of challenges..."
+}
+```
+
+### ✅ Output (Console Example)
+
+```text
+🎯 Original STORY:
+✅ Success Probability: 42.35%
+📈 Visual Score: 🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜
+
+⚡ Fast Paraphrase Suggestions:
+🔹 Suggestion #1
+🧠 Theme: gadgets / innovation / challenges
+✅ Success Probability: 56.10%
+🧠 Coherence Score: 0.74 ✅ Strong
+📜 Paraphrased Text: This groundbreaking device is designed to redefine how we interact with modern gadgets...
+```
+
+
 ---
 
 ## 📜 License
