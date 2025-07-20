@@ -22,18 +22,6 @@ Most scripts expect the following files to exist locally:
 
 - `all_good_projects_without_embeddings.json`
 
-These files should be located at:
-
-```bash
-/Users/kerenlint/Projects/Afeka/data/
-```
-or
-```bash
-/Users/kerenlint/Projects/Afeka/all_models/
-```
-
-Ensure all referenced keys (like `"Story Analysis"` or `"Risks and Challenges Analysis"`) exist in your dataset's JSON schema.
-
 ---
 
 ## 🚀 How to Use
