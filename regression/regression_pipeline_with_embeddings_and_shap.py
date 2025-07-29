@@ -7,23 +7,20 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 from sklearn.model_selection import train_test_split, cross_validate, StratifiedKFold, KFold
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, accuracy_score, confusion_matrix
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.feature_selection import SelectFromModel
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
-from sklearn.decomposition import TruncatedSVD
 from skopt import BayesSearchCV
 from skopt.space import Real, Integer, Categorical
 from xgboost import XGBRegressor
 import lightgbm as lgb
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
 import traceback
 import warnings
 from datetime import datetime
 from tqdm.auto import tqdm
-from sklearn.linear_model import LinearRegression, Ridge
-
 
 SEED = 42
 np.random.seed(SEED)
@@ -37,38 +34,27 @@ def safe_float(x, default=np.nan):
 
 def make_stratified_bins(y, n_bins=10, min_samples_per_bin=5):
     y_series = pd.Series(y).copy()
-    if len(y_series) == 0 or y_series.nunique() <= 1:
+    if len(y_series) == 0 or y_series.nunique() <= 1 or len(y_series) < n_bins * min_samples_per_bin:
         return None
-
-    max_possible_bins_samples = len(y_series) // min_samples_per_bin
-    max_possible_bins_unique = y_series.nunique()
-    n_bins = min(n_bins, max_possible_bins_samples, max_possible_bins_unique)
+    n_bins = min(n_bins, len(y_series) // min_samples_per_bin, y_series.nunique())
     n_bins = max(2, n_bins)
-
-    if n_bins < 2 or len(y_series) < n_bins : # Ensure enough samples for n_bins
-        return None
     try:
         binned_y = pd.qcut(y_series, q=n_bins, labels=False, duplicates='drop')
-        if binned_y.nunique() < 2 and n_bins >= 2:
-            raise ValueError(f"qcut resulted in {binned_y.nunique()} bins.")
-        if binned_y.value_counts().min() < 2 and binned_y.nunique() > 1 : # Check for very small bins
-            print(f"Warning: qcut created a bin with less than 2 samples. Bin counts: {binned_y.value_counts().to_dict()}")
-            raise ValueError("qcut created a bin with less than 2 samples.")
+        if binned_y.nunique() < 2 or binned_y.value_counts().min() < 2:
+            raise ValueError("Insufficient unique bins or small bin sizes.")
         return binned_y
-    except Exception:
+    except ValueError:
         try:
             binned_y_cut = pd.cut(y_series, bins=n_bins, labels=False, include_lowest=True, duplicates='drop')
-            if binned_y_cut.nunique() < 2 and n_bins >= 2:
-                 raise ValueError(f"pd.cut also resulted in {binned_y_cut.nunique()} bins.")
-            if binned_y_cut.value_counts().min() < 2 and binned_y_cut.nunique() > 1:
-                 print(f"Warning: pd.cut created a bin with less than 2 samples. Bin counts: {binned_y_cut.value_counts().to_dict()}")
-                 raise ValueError("pd.cut created a bin with less than 2 samples.")
+            if binned_y_cut.nunique() < 2 or binned_y_cut.value_counts().min() < 2:
+                raise ValueError("Insufficient unique bins or small bin sizes with pd.cut.")
             return binned_y_cut
-        except Exception:
+        except ValueError:
             return None
 
-def remove_outliers(X, y, threshold=3):
-    if X.empty or y.empty: return X, y
+def remove_outliers(X, y, threshold=3, remove=False):
+    if X.empty or len(y) == 0:
+        return X, pd.Series(y)
     y_series = pd.Series(y)
     q1, q3 = y_series.quantile([0.25, 0.75])
     iqr = q3 - q1
@@ -76,70 +62,56 @@ def remove_outliers(X, y, threshold=3):
     upper_bound = q3 + threshold * iqr
     mask = (y_series >= lower_bound) & (y_series <= upper_bound)
     removed_count = len(y) - mask.sum()
-    if removed_count > 0:
-        print(f"Identified {removed_count} outliers from {len(y)} samples (based on y).")
-    return X[mask].reset_index(drop=True), y[mask].reset_index(drop=True)
+    if remove:
+        if removed_count > 0:
+            print(f"Removed {removed_count} outliers based on y (IQR threshold={threshold}).")
+        return X[mask].reset_index(drop=True), y_series[mask].reset_index(drop=True)
+    else:
+        print(f"Flagged {removed_count} outliers (not removed).")
+        return X, y_series, mask
 
 def evaluate_model(model, X_test, y_test, model_name, output_dir):
-    if X_test.empty:
-        print(f"X_test is empty for {model_name}. Skipping evaluation.")
+    if X_test.empty or len(y_test) == 0:
+        print(f"Skipping evaluation for {model_name}: Empty test data.")
         return {}
     
-    # Predict on test set
     y_pred = model.predict(X_test)
-    
-    # Since y_test and y_pred are log-transformed, inverse transform for interpretation
-    y_test_orig = np.expm1(y_test)  # Inverse of log1p
+    y_test_orig = np.expm1(y_test)
     y_pred_orig = np.expm1(y_pred)
     
-    # Compute regression metrics on log-transformed scale
     mse = mean_squared_error(y_test, y_pred)
     rmse = np.sqrt(mse)
     mae = mean_absolute_error(y_test, y_pred)
     r2 = r2_score(y_test, y_pred)
+    within_20_percent = np.mean(np.abs(y_pred_orig - y_test_orig) / (y_test_orig + 1e-6) <= 0.2) * 100
     
-    # Compute percentage of predictions within ±20% of true pledged ratio (original scale)
-    within_20_percent = np.mean((np.abs(y_pred_orig - y_test_orig) / (y_test_orig + 1e-6)) <= 0.2) * 100
+    print(f"\nEvaluation for {model_name}: RMSE={rmse:.2f}, MAE={mae:.2f}, R²={r2:.3f}, Within 20%={within_20_percent:.2f}%")
     
-    print(f"\n🔍 Evaluation for {model_name} on Test Set")
-    print(f"📉 RMSE (log scale): {rmse:,.2f}")
-    print(f"📈 MAE (log scale): {mae:,.2f}")
-    print(f"📊 R² Score (log scale): {r2:.3f}")
-    print(f"✅ Predictions within ±20% of true pledged ratio: {within_20_percent:.2f}%")
+    plt.figure(figsize=(12, 5))
     
-    # Plot 1: Scatter plot of actual vs. predicted (log scale)
-    plt.figure(figsize=(8, 6))
-    plt.scatter(y_test, y_pred, alpha=0.3, edgecolors='k', s=50)
+    plt.subplot(1, 2, 1)
+    plt.scatter(y_test, y_pred, alpha=0.6, s=30)
     plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-    plt.xlabel('Actual (log scale)')
-    plt.ylabel('Predicted (log scale)')
-    plt.title(f'Predictions vs Actual - {model_name} (Log Scale)')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    scatter_path = os.path.join(output_dir, f'predictions_{model_name}_log_scale.png')
-    plt.savefig(scatter_path, dpi=300)
-    plt.close()
-    print(f"📈 Saved log-scale prediction scatter plot to {scatter_path}")
+    plt.xlabel('Actual (log-scale)')
+    plt.ylabel('Predicted (log-scale)')
+    plt.title(f'{model_name} - Log Scale Predictions')
+    plt.grid(True, alpha=0.3)
     
-    # Plot 2: Scatter plot of actual vs. predicted (original scale)
-    plt.figure(figsize=(8, 6))
-    plt.scatter(y_test_orig, y_pred_orig, alpha=0.3, edgecolors='k', s=50)
+    plt.subplot(1, 2, 2)
+    plt.scatter(y_test_orig, y_pred_orig, alpha=0.6, s=30)
     plt.plot([y_test_orig.min(), y_test_orig.max()], [y_test_orig.min(), y_test_orig.max()], 'r--', lw=2)
-    plt.xlabel('Actual Pledged-to-Goal Ratio')
-    plt.ylabel('Predicted Pledged-to-Goal Ratio')
-    plt.title(f'Predictions vs Actual - {model_name} (Original Scale)')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    scatter_orig_path = os.path.join(output_dir, f'predictions_{model_name}_original_scale.png')
-    plt.savefig(scatter_orig_path, dpi=300)
-    plt.close()
-    print(f"📈 Saved original-scale prediction scatter plot to {scatter_orig_path}")
+    plt.xlabel('Actual Ratio')
+    plt.ylabel('Predicted Ratio')
+    plt.title(f'{model_name} - Original Scale Predictions')
+    plt.grid(True, alpha=0.3)
     
-    # Bin predictions and compute categorical metrics
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'predictions_{model_name}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
     bin_metrics = bin_predictions(y_test_orig, y_pred_orig, model_name, output_dir)
     
-    # Combine regression and classification metrics
-    metrics = {
+    return {
         'model': model_name,
         'RMSE': rmse,
         'MAE': mae,
@@ -148,208 +120,343 @@ def evaluate_model(model, X_test, y_test, model_name, output_dir):
         'Within_20_Percent': within_20_percent,
         'Classification_Accuracy': bin_metrics.get('accuracy', 0.0)
     }
-    
-    return metrics
-
-from sklearn.metrics import confusion_matrix, accuracy_score
-import seaborn as sns
 
 def bin_predictions(y_true, y_pred, model_name, output_dir):
-    """
-    Bin actual and predicted pledged-to-goal ratios into categories and compute metrics.
-    Categories: Failed (<0.1), Underfunded (0.1 to <0.8), Just Funded (0.8 to 1.2), Overfunded (>1.2)
-    """
-    # Define bins and labels
-    bins = [-float('inf'), 0.1, 0.8, 1.2, float('inf')]
-    labels = ['Failed', 'Underfunded', 'Just Funded', 'Overfunded']
-    
-    # Bin actual and predicted values
+    bins = [-np.inf, 0.1, 0.8, 1.2, np.inf]
+    labels = ['Failed (< 0.1)', 'Underfunded (0.1 ≤ x < 0.8)', 'Just Funded (0.8 ≤ x ≤ 1.2)', 'Overfunded (> 1.2)']
     y_true_binned = pd.cut(y_true, bins=bins, labels=labels, include_lowest=True)
     y_pred_binned = pd.cut(y_pred, bins=bins, labels=labels, include_lowest=True)
-    
-    # Compute accuracy
     accuracy = accuracy_score(y_true_binned, y_pred_binned)
-    print(f"📊 Classification Accuracy for {model_name}: {accuracy:.3f}")
-    
-    # Compute confusion matrix
     cm = confusion_matrix(y_true_binned, y_pred_binned, labels=labels)
     
-    # Plot confusion matrix
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
-    plt.title(f'Confusion Matrix - {model_name}')
-    plt.xlabel('Predicted')
+    plt.title(f'Confusion Matrix - {model_name}\nAccuracy: {accuracy:.3f}')
     plt.ylabel('Actual')
+    plt.xlabel('Predicted')
     plt.tight_layout()
-    cm_path = os.path.join(output_dir, f'confusion_matrix_{model_name}.png')
-    plt.savefig(cm_path, dpi=300)
+    plt.savefig(os.path.join(output_dir, f'confusion_matrix_{model_name}.png'), dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"📈 Saved confusion matrix to {cm_path}")
-    
-    # Save binning summary
-    bin_summary = pd.DataFrame({
-        'Actual': y_true_binned.value_counts().reindex(labels, fill_value=0),
-        'Predicted': y_pred_binned.value_counts().reindex(labels, fill_value=0)
-    })
-    bin_summary_path = os.path.join(output_dir, f'bin_summary_{model_name}.csv')
-    bin_summary.to_csv(bin_summary_path)
-    print(f"📊 Saved binning summary to {bin_summary_path}")
     
     return {'accuracy': accuracy}
-
 
 def cross_validate_model_with_skf(model, X, y, skf_splitter_obj):
     scoring = {'r2': 'r2', 'rmse': 'neg_root_mean_squared_error', 'mae': 'neg_mean_absolute_error'}
     y_cv_bins = make_stratified_bins(y, n_bins=skf_splitter_obj.get_n_splits())
-    
     if y_cv_bins is None or y_cv_bins.nunique() < 2:
-        print(f"Warning: Could not create enough bins for stratified CV for model. Using standard KFold with {skf_splitter_obj.get_n_splits()} splits.")
-        cv_folds_for_cv = KFold(n_splits=skf_splitter_obj.get_n_splits(), shuffle=True, random_state=skf_splitter_obj.random_state)
-    elif y_cv_bins.nunique() < skf_splitter_obj.get_n_splits():
-        print(f"Warning: Number of unique bins ({y_cv_bins.nunique()}) is less than n_splits ({skf_splitter_obj.get_n_splits()}). Stratification might be suboptimal but proceeding.")
-        cv_folds_for_cv = skf_splitter_obj.split(X, y_cv_bins)
+        cv = KFold(n_splits=skf_splitter_obj.get_n_splits(), shuffle=True, random_state=skf_splitter_obj.random_state)
     else:
-        cv_folds_for_cv = skf_splitter_obj.split(X, y_cv_bins)
-        
-    cv_results = cross_validate(model, X, y, cv=cv_folds_for_cv, scoring=scoring, n_jobs=-1, error_score='raise')
+        cv = skf_splitter_obj.split(X, y_cv_bins)
+    cv_results = cross_validate(model, X, y, cv=cv, scoring=scoring, n_jobs=2)
     return {
-        'CV_R2': cv_results['test_r2'].mean(), 'CV_R2_std': cv_results['test_r2'].std(),
-        'CV_RMSE': -cv_results['test_rmse'].mean(), 'CV_RMSE_std': cv_results['test_rmse'].std(),
-        'CV_MAE': -cv_results['test_mae'].mean(), 'CV_MAE_std': cv_results['test_mae'].std()
+        'CV_R2': cv_results['test_r2'].mean(),
+        'CV_R2_std': cv_results['test_r2'].std(),
+        'CV_RMSE': -cv_results['test_rmse'].mean(),
+        'CV_RMSE_std': cv_results['test_rmse'].std(),
+        'CV_MAE': -cv_results['test_mae'].mean(),
+        'CV_MAE_std': cv_results['test_mae'].std()
     }
+
+def generate_enhanced_shap_analysis(model, X_train, X_test, y_train, model_name, output_dir, random_state_seed=SEED):
+    try:
+        embedding_patterns = ['Story_emb_', 'Risks_emb_', 'StorySVD_', 'RisksSVD_']
+        pure_feature_cols = [col for col in X_test.columns 
+                           if not any(col.startswith(pattern) for pattern in embedding_patterns)]
+        
+        print(f"SHAP Analysis for {model_name}: Using {len(pure_feature_cols)} pure features out of {len(X_test.columns)} total features")
+        
+        X_test_pure = X_test[pure_feature_cols]
+        X_train_pure = X_train[pure_feature_cols]
+        
+        sample_size = min(1000, len(X_test_pure)) if len(X_test_pure) > 200 else len(X_test_pure)
+        X_test_sample = X_test_pure.sample(n=sample_size, random_state=random_state_seed) if len(X_test_pure) > sample_size else X_test_pure
+        
+        if X_test_sample.empty:
+            raise ValueError("X_test_sample for SHAP is empty.")
+        
+        shap_values = None
+        feature_importance = None
+        
+        if model_name == "Ridge":
+            X_train_s_shap = X_train_pure.sample(n=min(500, len(X_train_pure)), random_state=random_state_seed) if len(X_train_pure) > 500 else X_train_pure
+            ridge_pure = Ridge(**model.get_params())
+            ridge_pure.fit(X_train_pure, y_train)
+            explainer = shap.LinearExplainer(ridge_pure, X_train_s_shap)
+            shap_values = explainer.shap_values(X_test_sample)
+            feature_importance = pd.DataFrame({
+                'feature': X_test_sample.columns,
+                'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+            }).sort_values('mean_abs_shap', ascending=False)
+            
+        else:
+            if model_name == "RandomForest":
+                model_pure = RandomForestRegressor(**model.get_params())
+            elif model_name == "XGBoost":
+                model_pure = XGBRegressor(**model.get_params())
+            elif model_name == "LightGBM":
+                model_pure = lgb.LGBMRegressor(**model.get_params())
+            
+            model_pure.fit(X_train_pure, y_train)
+            masker = shap.maskers.Independent(data=X_test_sample)
+            explainer = shap.TreeExplainer(model_pure, masker)
+            shap_obj = explainer(X_test_sample, check_additivity=False)
+            shap_values = shap_obj.values
+            feature_importance = pd.DataFrame({
+                'feature': X_test_sample.columns,
+                'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+            }).sort_values('mean_abs_shap', ascending=False)
+        
+        n_features_to_show = max(15, min(25, len(pure_feature_cols)))
+        
+        plt.figure(figsize=(10, 8))
+        
+        if model_name == "Ridge":
+            top_features = feature_importance.head(n_features_to_show)
+            top_indices = [X_test_sample.columns.get_loc(f) for f in top_features['feature']]
+            shap_values_top = shap_values[:, top_indices]
+            
+            shap.summary_plot(shap_values_top, X_test_sample[top_features['feature']], 
+                            plot_type="bar", max_display=n_features_to_show, show=False)
+        else:
+            shap_obj_df = pd.DataFrame(shap_values, columns=X_test_sample.columns)
+            top_features = feature_importance.head(n_features_to_show)['feature'].tolist()
+            shap_obj_filtered = shap.Explanation(
+                values=shap_values[:, [X_test_sample.columns.get_loc(f) for f in top_features]],
+                base_values=shap_obj.base_values,
+                data=X_test_sample[top_features].values,
+                feature_names=top_features
+            )
+            
+            shap.plots.beeswarm(shap_obj_filtered, max_display=n_features_to_show, show=False)
+        
+        plt.title(f"SHAP Feature Importance - {model_name} (Top {n_features_to_show} Pure Features)", fontsize=14)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'shap_{model_name}_top_{n_features_to_show}_features.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        plt.figure(figsize=(12, 8))
+        top_20_features = feature_importance.head(20)
+        plt.barh(range(len(top_20_features)), top_20_features['mean_abs_shap'])
+        plt.yticks(range(len(top_20_features)), top_20_features['feature'])
+        plt.xlabel('Mean |SHAP value|')
+        plt.title(f'Top 20 Feature Importance - {model_name}')
+        plt.gca().invert_yaxis()
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'shap_{model_name}_bar_chart.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        feature_importance.to_csv(os.path.join(output_dir, f'shap_feature_importance_{model_name}.csv'), index=False)
+        
+        shap_summary = {
+            'top_20_features': feature_importance.head(20).to_dict('records'),
+            'total_features_analyzed': len(pure_feature_cols),
+            'sample_size': len(X_test_sample),
+            'features_displayed': n_features_to_show
+        }
+        
+        with open(os.path.join(output_dir, f'shap_summary_{model_name}.json'), 'w') as f:
+            json.dump(shap_summary, f, indent=2)
+        
+        print(f"SHAP analysis completed for {model_name}. Displayed top {n_features_to_show} features.")
+        
+    except Exception as e:
+        print(f"SHAP analysis failed for {model_name}: {e}")
+        traceback.print_exc()
+        return None
+
+def create_detailed_outcome_bands_visualization(predictions_df, output_dir):
+    def bin_ratio(ratio):
+        if pd.isna(ratio) or ratio < 0.1:
+            return "Failed (< 0.1)"
+        elif ratio < 0.8:
+            return "Underfunded (0.1 ≤ x < 0.8)"
+        elif ratio <= 1.2:
+            return "Just Funded (0.8 ≤ x ≤ 1.2)"
+        else:
+            return "Overfunded (> 1.2)"
+
+    banded_results = predictions_df.apply(lambda col: col.apply(bin_ratio))
+    band_counts = banded_results.apply(pd.Series.value_counts).fillna(0).astype(int).T
+    logical_order = ["Failed (< 0.1)", "Underfunded (0.1 ≤ x < 0.8)", "Just Funded (0.8 ≤ x ≤ 1.2)", "Overfunded (> 1.2)"]
+    band_counts = band_counts.reindex(columns=logical_order, fill_value=0)
+    
+    colors = ['#1f77b4', '#ff7f0e', '#9467bd', '#d62728']
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    bottom = np.zeros(len(band_counts))
+    for i, outcome in enumerate(logical_order):
+        values = band_counts[outcome].values
+        bars = ax.bar(range(len(band_counts)), values, bottom=bottom, 
+                      label=outcome, color=colors[i], edgecolor='black', linewidth=1.2)
+        
+        for j, (bar, value) in enumerate(zip(bars, values)):
+            if value > 0:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., bottom[j] + height/2.,
+                       f'{int(value)}', ha='center', va='center', fontsize=11, fontweight='bold')
+        
+        bottom += values
+    
+    totals = band_counts.sum(axis=1)
+    for i, (model, total) in enumerate(totals.items()):
+        ax.text(i, total + 100, f'Total: {int(total)}', ha='center', fontsize=12, fontweight='bold')
+    
+    ax.set_ylim(0, max(totals) * 1.1)
+    ax.set_xlabel('Model', fontsize=12)
+    ax.set_ylabel('Number of Projects', fontsize=12)
+    ax.set_title('Distribution of Predicted Project Outcomes by Model (Aligned)', fontsize=14, fontweight='bold')
+    ax.set_xticks(range(len(band_counts)))
+    ax.set_xticklabels(band_counts.index, fontsize=11)
+    
+    ax.legend(title='Predicted Outcome Band', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format(int(x), ',')))
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'predicted_outcomes_bands_detailed.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    percentages = band_counts.div(band_counts.sum(axis=1), axis=0) * 100
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    bottom = np.zeros(len(percentages))
+    for i, outcome in enumerate(logical_order):
+        values = percentages[outcome].values
+        bars = ax.bar(range(len(percentages)), values, bottom=bottom, 
+                      label=outcome, color=colors[i], edgecolor='black', linewidth=1.2)
+        
+        for j, (bar, value) in enumerate(zip(bars, values)):
+            if value > 5:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., bottom[j] + height/2.,
+                       f'{value:.1f}%', ha='center', va='center', fontsize=10, fontweight='bold')
+        
+        bottom += values
+    
+    ax.set_ylim(0, 100)
+    ax.set_xlabel('Model', fontsize=12)
+    ax.set_ylabel('Percentage of Projects (%)', fontsize=12)
+    ax.set_title('Distribution of Predicted Project Outcomes by Model (Percentage)', fontsize=14, fontweight='bold')
+    ax.set_xticks(range(len(percentages)))
+    ax.set_xticklabels(percentages.index, fontsize=11)
+    
+    ax.legend(title='Predicted Outcome Band', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'predicted_outcomes_bands_percentage.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    band_counts.to_csv(os.path.join(output_dir, 'predicted_outcomes_summary_detailed.csv'))
+    percentages.round(2).to_csv(os.path.join(output_dir, 'predicted_outcomes_percentages.csv'))
+    
+    print(f"Created detailed outcome bands visualizations")
+    return band_counts, percentages
 
 class DataPreprocessor:
     def __init__(self, story_cols, risks_cols, output_dir='results',
                  svd_n_components=50, svd_clip_range=(-10, 10),
                  fs_max_features=50, random_state=SEED):
-        self.story_cols = story_cols; self.risks_cols = risks_cols
-        self.output_dir = output_dir; self.svd_n_components = svd_n_components
-        self.svd_clip_range = svd_clip_range; self.fs_max_features = fs_max_features
+        self.story_cols = []
+        self.risks_cols = []
+        self.output_dir = output_dir
+        self.svd_n_components = svd_n_components
+        self.svd_clip_range = svd_clip_range
+        self.fs_max_features = fs_max_features
         self.random_state = random_state
-        self.imputer = None; self.scaler_non_emb = None
-        self.scaler_story_emb = None; self.scaler_risks_emb = None
-        self.story_svd = None; self.risks_svd = None
-        self.one_hot_encoder_columns = None; self.feature_selector = None
-        self.selected_features = None; self.numerical_cols_to_impute = None
-        self.non_emb_cols_to_scale = None; self._last_fit_X_index = pd.Index([])
-
+        self.imputer = None
+        self.scaler_non_emb = None
+        self.scaler_story_emb = None
+        self.scaler_risks_emb = None
+        self.story_svd = None
+        self.risks_svd = None
+        self.one_hot_encoder_columns = None
+        self.feature_selector = None
+        self.selected_features = None
+        self.numerical_cols_to_impute = None
+        self.non_emb_cols_to_scale = None
+        self._last_fit_X_index = pd.Index([])
 
     def _preprocess_embeddings_with_svd(self, X_df, fit=False):
-        X = X_df.copy()
-        story_matrix = X[self.story_cols].values.astype(np.float32)
-        risks_matrix = X[self.risks_cols].values.astype(np.float32)
-        story_matrix = np.clip(story_matrix, *self.svd_clip_range); risks_matrix = np.clip(risks_matrix, *self.svd_clip_range)
-        story_matrix = np.nan_to_num(story_matrix, nan=0.0, posinf=0.0, neginf=0.0)
-        risks_matrix = np.nan_to_num(risks_matrix, nan=0.0, posinf=0.0, neginf=0.0)
-
-        if fit:
-            self.scaler_story_emb = RobustScaler(); self.scaler_risks_emb = RobustScaler()
-            story_matrix_scaled = self.scaler_story_emb.fit_transform(story_matrix)
-            risks_matrix_scaled = self.scaler_risks_emb.fit_transform(risks_matrix)
-            actual_svd_story_comps = min(self.svd_n_components, story_matrix_scaled.shape[1]-1, story_matrix_scaled.shape[0]-1)
-            actual_svd_risks_comps = min(self.svd_n_components, risks_matrix_scaled.shape[1]-1, risks_matrix_scaled.shape[0]-1)
-            if actual_svd_story_comps < 1 or actual_svd_risks_comps < 1:
-                print("Warning: Not enough features/samples for SVD. Skipping SVD.")
-                self.story_svd, self.risks_svd = None, None # Mark SVD as not fitted
-                return X # Return original X if SVD cannot be performed
-            self.story_svd = TruncatedSVD(n_components=actual_svd_story_comps, random_state=self.random_state)
-            self.risks_svd = TruncatedSVD(n_components=actual_svd_risks_comps, random_state=self.random_state)
-            story_svd_result = self.story_svd.fit_transform(story_matrix_scaled)
-            risks_svd_result = self.risks_svd.fit_transform(risks_matrix_scaled)
-            self.svd_n_components_actual_story = actual_svd_story_comps # Store actual components used
-            self.svd_n_components_actual_risks = actual_svd_risks_comps
-            if self.story_svd:
-                plt.figure(figsize=(10, 4))
-                plt.subplot(1, 2, 1); plt.plot(np.cumsum(self.story_svd.explained_variance_ratio_), marker='o'); plt.title("Story SVD")
-                if self.risks_svd: plt.subplot(1, 2, 2); plt.plot(np.cumsum(self.risks_svd.explained_variance_ratio_), marker='o'); plt.title("Risks SVD")
-                plt.tight_layout(); plt.savefig(os.path.join(self.output_dir, 'svd_scree.png'), dpi=300); plt.close()
-        else:
-            if not self.story_svd or not self.risks_svd : # Check if SVD was fitted and successful
-                return X # SVD was skipped during fit, so skip transform
-            story_matrix_scaled = self.scaler_story_emb.transform(story_matrix)
-            risks_matrix_scaled = self.scaler_risks_emb.transform(risks_matrix)
-            story_svd_result = self.story_svd.transform(story_matrix_scaled)
-            risks_svd_result = self.risks_svd.transform(risks_matrix_scaled)
-
-        X_processed = X.drop(columns=self.story_cols + self.risks_cols, errors='ignore').reset_index(drop=True)
-        if self.story_svd: story_svd_df = pd.DataFrame(story_svd_result, columns=[f"StorySVD_{i}" for i in range(self.svd_n_components_actual_story)], index=X_processed.index)
-        else: story_svd_df = pd.DataFrame(index=X_processed.index) # Empty if SVD skipped
-        if self.risks_svd: risks_svd_df = pd.DataFrame(risks_svd_result, columns=[f"RisksSVD_{i}" for i in range(self.svd_n_components_actual_risks)], index=X_processed.index)
-        else: risks_svd_df = pd.DataFrame(index=X_processed.index)
-        X_processed = pd.concat([X_processed, story_svd_df, risks_svd_df], axis=1)
-        return X_processed
+        return X_df
 
     def fit(self, X_train_df, y_train_series):
-        X_train = X_train_df.copy(); y_train = y_train_series.copy()
-        self._last_fit_X_index = X_train_df.index # Store for transform save naming
-        self.numerical_cols_to_impute = X_train.select_dtypes(include=np.number).columns.tolist()
+        X_train = X_train_df.copy()
+        y_train = y_train_series.copy()
+        self._last_fit_X_index = X_train_df.index
+
+        self.numerical_cols_to_impute = [col for col in X_train.select_dtypes(include=np.number).columns
+                                       if not (col.startswith('Story_emb_') or col.startswith('Risks_emb_') or
+                                               col.startswith('StorySVD_') or col.startswith('RisksSVD_'))]
         valid_numerical_cols = [col for col in self.numerical_cols_to_impute if not X_train[col].isna().all()]
         if len(valid_numerical_cols) < len(self.numerical_cols_to_impute):
             X_train = X_train.drop(columns=[c for c in self.numerical_cols_to_impute if c not in valid_numerical_cols])
         self.numerical_cols_to_impute = valid_numerical_cols
+
         if self.numerical_cols_to_impute:
             self.imputer = SimpleImputer(strategy='median')
             X_train[self.numerical_cols_to_impute] = self.imputer.fit_transform(X_train[self.numerical_cols_to_impute])
-        if all(c in X_train.columns for c in ['goal', 'rewardscount', 'Story_Compound', 'Story_Flesch_Reading_Ease']):
-            X_train['goal_per_reward'] = X_train['goal'] / (X_train['rewardscount'].replace(0, 1e-6) + 1e-6) # Avoid div by zero
-            X_train['story_sentiment_readability'] = X_train['Story_Compound'] * X_train['Story_Flesch_Reading_Ease']
-        self.non_emb_cols_to_scale = [c for c in X_train.select_dtypes(include=np.number).columns if not any(c.startswith(p) for p in ['Story_emb_', 'Risks_emb_', 'StorySVD_', 'RisksSVD_'])]
+
+        self.non_emb_cols_to_scale = [c for c in X_train.select_dtypes(include=np.number).columns
+                                     if not any(c.startswith(p) for p in ['Story_emb_', 'Risks_emb_', 'StorySVD_', 'RisksSVD_'])]
         if self.non_emb_cols_to_scale:
             self.scaler_non_emb = RobustScaler()
             X_train[self.non_emb_cols_to_scale] = self.scaler_non_emb.fit_transform(X_train[self.non_emb_cols_to_scale])
-        if self.story_cols and self.risks_cols and all(c in X_train.columns for c in self.story_cols) and all(c in X_train.columns for c in self.risks_cols):
-            X_train = self._preprocess_embeddings_with_svd(X_train, fit=True)
+
         X_train = pd.get_dummies(X_train, drop_first=True, dummy_na=False, columns=X_train.select_dtypes(include=['object', 'category']).columns)
         self.one_hot_encoder_columns = X_train.columns.tolist()
-        
+
         actual_fs_max_features = min(self.fs_max_features, X_train.shape[1])
         if X_train.shape[1] > actual_fs_max_features and actual_fs_max_features > 0:
             X_fs = X_train.copy().replace([np.inf, -np.inf], np.nan)
             if X_fs.isnull().any().any():
                 num_cols_fs = X_fs.select_dtypes(include=np.number).columns
-                if len(num_cols_fs) > 0: X_fs[num_cols_fs] = SimpleImputer(strategy='median').fit_transform(X_fs[num_cols_fs])
+                if num_cols_fs.any():
+                    X_fs[num_cols_fs] = SimpleImputer(strategy='median').fit_transform(X_fs[num_cols_fs])
             rf_fs = RandomForestRegressor(random_state=self.random_state, n_jobs=-1, n_estimators=50, max_depth=10)
             self.feature_selector = SelectFromModel(rf_fs, threshold=-np.inf, max_features=actual_fs_max_features)
-            try: self.feature_selector.fit(X_fs, y_train)
-            except ValueError as e: print(f"Warning: RF for feature selection failed: {e}. Skipping FS."); self.feature_selector = None
-            if self.feature_selector: self.selected_features = X_train.columns[self.feature_selector.get_support()].tolist()
-            else: self.selected_features = X_train.columns.tolist()
-        else: self.selected_features = X_train.columns.tolist()
+            try:
+                self.feature_selector.fit(X_fs, y_train)
+            except ValueError as e:
+                print(f"Warning: Feature selection failed: {e}. Using all features.")
+                self.feature_selector = None
+            self.selected_features = X_train.columns[self.feature_selector.get_support()].tolist() if self.feature_selector else X_train.columns.tolist()
+        else:
+            self.selected_features = X_train.columns.tolist()
         return self
 
     def transform(self, X_df):
-        X = X_df.copy(); original_index_name = X.index.name
+        X = X_df.copy()
         if not all([self.imputer, self.scaler_non_emb, self.one_hot_encoder_columns, self.selected_features]):
-             raise RuntimeError("Preprocessor not fitted.")
+            raise RuntimeError("Preprocessor not fitted.")
         transform_num_cols = [col for col in self.numerical_cols_to_impute if col in X.columns]
-        if transform_num_cols: X[transform_num_cols] = self.imputer.transform(X[transform_num_cols])
+        if transform_num_cols:
+            X[transform_num_cols] = self.imputer.transform(X[transform_num_cols])
         if all(c in X.columns for c in ['goal', 'rewardscount', 'Story_Compound', 'Story_Flesch_Reading_Ease']):
             X['goal_per_reward'] = X['goal'] / (X['rewardscount'].replace(0, 1e-6) + 1e-6)
             X['story_sentiment_readability'] = X['Story_Compound'] * X['Story_Flesch_Reading_Ease']
         transform_non_emb_cols = [col for col in self.non_emb_cols_to_scale if col in X.columns]
-        if transform_non_emb_cols: X[transform_non_emb_cols] = self.scaler_non_emb.transform(X[transform_non_emb_cols])
-        index_was_reset_by_svd = False
-        if self.story_cols and self.risks_cols and self.story_svd: # Check if SVD was actually fitted
-             if all(c in X.columns for c in self.story_cols) and all(c in X.columns for c in self.risks_cols):
-                X = self._preprocess_embeddings_with_svd(X, fit=False); index_was_reset_by_svd = True
+        if transform_non_emb_cols:
+            X[transform_non_emb_cols] = self.scaler_non_emb.transform(X[transform_non_emb_cols])
         X = pd.get_dummies(X, drop_first=True, dummy_na=False, columns=X.select_dtypes(include=['object', 'category']).columns)
         current_cols = X.columns.tolist()
         for col in self.one_hot_encoder_columns:
-            if col not in current_cols: X[col] = 0
-        try: X = X[self.one_hot_encoder_columns]
+            if col not in current_cols:
+                X[col] = 0
+        try:
+            X = X[self.one_hot_encoder_columns]
         except KeyError as e:
             missing_cols = [c for c in self.one_hot_encoder_columns if c not in X.columns]
-            print(f"Error aligning OHE columns. Missing in X: {missing_cols}. OHE cols: {self.one_hot_encoder_columns[:5]}. X cols: {X.columns[:5]}")
-            raise e
+            raise KeyError(f"Missing columns in transform: {missing_cols[:5]}...") from e
         if self.selected_features:
-            try: X = X[self.selected_features]
+            try:
+                X = X[self.selected_features]
             except KeyError as e:
                 missing_sel_cols = [c for c in self.selected_features if c not in X.columns]
-                print(f"Error applying selected features. Missing in X: {missing_sel_cols}. Selected: {self.selected_features[:5]}. X cols: {X.columns[:5]}")
-                raise e
-        if not index_was_reset_by_svd:
-            X = X.reset_index(drop=True)
-            if original_index_name is not None: X.index.name = original_index_name
+                raise KeyError(f"Missing selected features: {missing_sel_cols[:5]}...") from e
+        X = X.reset_index(drop=True)
         dataset_type = "train_set" if X_df.index.equals(self._last_fit_X_index) else "test_set"
         X.to_csv(os.path.join(self.output_dir, f'transformed_{dataset_type}.csv'), index=False)
         return X
@@ -359,28 +466,40 @@ class DataPreprocessor:
         return self.transform(X_train_df)
 
 def extract_features(data):
-    features, story_embeddings, risks_embeddings, error_count = [], [], [], 0
+    features, story_embeddings, risks_embeddings, error_count, skipped_count = [], [], [], 0, 0
     for item in tqdm(data, desc="Extracting Features"):
+        if item.get('state') not in ['successful', 'failed']:
+            skipped_count += 1
+            continue
+        ratio = safe_float(item.get('pledged_to_goal_ratio'))
+        if pd.isna(ratio) or ratio <= 0:
+            skipped_count += 1
+            continue
         try:
-            if item.get('state') not in ['successful', 'failed']: continue
-            ratio = safe_float(item.get('pledged_to_goal_ratio'))
-            if np.isnan(ratio) or ratio is None: continue
-            f = {'pledged_to_goal_ratio': ratio, 'goal': safe_float(item.get('goal'), 0.0),
-                 'projectFAQsCount': safe_float(item.get('projectFAQsCount'), 0.0),
-                 'rewardscount': safe_float(item.get('rewardscount'), 0.0),
-                 'project_length_days': safe_float(item.get('project_length_days')),
-                 'preparation_days': safe_float(item.get('preparation_days')),
-                 'Story_Compound': safe_float(item.get('Story_Compound')),
-                 'Risks_Compound': safe_float(item.get('Risks_Compound')),
-                 'Story_Flesch_Reading_Ease': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('Flesch Reading Ease'))}
+            f = {
+                'pledged_to_goal_ratio': ratio, 'goal': safe_float(item.get('goal'), 0.0),
+                'projectFAQsCount': safe_float(item.get('projectFAQsCount'), 0.0),
+                'rewardscount': safe_float(item.get('rewardscount'), 0.0),
+                'project_length_days': safe_float(item.get('project_length_days')),
+                'preparation_days': safe_float(item.get('preparation_days')),
+                'Story_Compound': safe_float(item.get('Story_Compound')),
+                'Risks_Compound': safe_float(item.get('Risks_Compound')),
+                'Story_Flesch_Reading_Ease': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('Flesch Reading Ease'))
+            }
             for key, value in item.items():
-                if key.startswith('category_') and key not in f: f[key] = 1 if value is True or str(value).lower() in ['true', '1'] else 0
+                if key.startswith('category_') and key not in f:
+                    f[key] = 1 if value is True or str(value).lower() in ['true', '1'] else 0
             features.append(f)
-            story_emb = item.get('story_miniLM', []); risks_emb = item.get('risks_miniLM', [])
+            story_emb = item.get('story_miniLM', [])
+            risks_emb = item.get('risks_miniLM', [])
             story_embeddings.append(story_emb if isinstance(story_emb, list) and len(story_emb) > 0 else [0.0] * 384)
             risks_embeddings.append(risks_emb if isinstance(risks_emb, list) and len(risks_emb) > 0 else [0.0] * 384)
-        except Exception: error_count += 1
-    if not features: return pd.DataFrame()
+        except Exception as e:
+            error_count += 1
+            print(f"Error extracting item: {e}")
+    print(f"Extracted {len(features)} features, skipped {skipped_count}, errors {error_count}")
+    if not features:
+        return pd.DataFrame()
     df = pd.DataFrame(features)
     story_df = pd.DataFrame(story_embeddings, columns=[f"Story_emb_{i}" for i in range(384)], index=df.index)
     risks_df = pd.DataFrame(risks_embeddings, columns=[f"Risks_emb_{i}" for i in range(384)], index=df.index)
@@ -388,239 +507,479 @@ def extract_features(data):
 
 def train_model(X_train, y_train, X_test, y_test, model_instance, search_space,
                 cv_splitter_obj, model_name, output_dir, random_state_seed=SEED):
-    try:
-        if X_train.empty: print(f"X_train is empty for {model_name}. Skipping training."); return None, None, {}
-        if hasattr(model_instance, 'random_state'): model_instance.set_params(random_state=random_state_seed)
-        if model_name == 'XGBoost' and hasattr(model_instance, 'seed'): model_instance.set_params(seed=random_state_seed)
-
-        y_train_bins_hpo = make_stratified_bins(y_train, n_bins=5)
-        stratify_hpo = y_train_bins_hpo if y_train_bins_hpo is not None and y_train_bins_hpo.nunique() > 1 else None
-        
-        # Ensure X_val_hpo is not empty
-        test_size_hpo = 0.15
-        if len(X_train) * test_size_hpo < 2 : test_size_hpo = max(1, len(X_train) // 2) / len(X_train) if len(X_train) > 1 else 0.0
-        if len(X_train) < 2 or test_size_hpo == 0.0: X_val_hpo, y_val_hpo = X_test, y_test # Fallback, not ideal
-        else: _, X_val_hpo, _, y_val_hpo = train_test_split(X_train, y_train, test_size=test_size_hpo, random_state=random_state_seed, stratify=stratify_hpo)
-        if X_val_hpo.empty : X_val_hpo, y_val_hpo = X_test, y_test # another fallback
-
-        fit_kwargs = {}
-        if model_name == "XGBoost": 
-            if hasattr(model_instance, 'early_stopping_rounds'):
-                model_instance.set_params(early_stopping_rounds=None)  # Remove for CV
-            fit_kwargs = {'eval_set': [(X_val_hpo, y_val_hpo)], 'verbose': False}
-        elif model_name == "LightGBM": fit_kwargs = {'callbacks': [lgb.early_stopping(stopping_rounds=10, verbose=-1)], 'eval_set': [(X_val_hpo, y_val_hpo)]}
-
-        y_cv_bins_bayes = make_stratified_bins(y_train, n_bins=cv_splitter_obj.get_n_splits())
-        if y_cv_bins_bayes is None or y_cv_bins_bayes.nunique() < 2:
-            cv_iter_bayes = KFold(n_splits=cv_splitter_obj.get_n_splits(), shuffle=True, random_state=cv_splitter_obj.random_state)
-        else: cv_iter_bayes = list(cv_splitter_obj.split(X_train, y_cv_bins_bayes))
-        
-        opt = BayesSearchCV(model_instance, search_space, n_iter=15 if model_name != 'OLS' else 3, cv=cv_iter_bayes, n_jobs=-1, scoring='neg_mean_squared_error', random_state=random_state_seed, verbose=0)
-        opt.fit(X_train, y_train, **fit_kwargs)
-        best_model = opt.best_estimator_
-        cv_metrics = cross_validate_model_with_skf(best_model, X_train, y_train, cv_splitter_obj)
-        joblib.dump(best_model, os.path.join(output_dir, f'best_{model_name}.joblib'))
-        s_params = {k: (v.item() if hasattr(v, 'item') else v) for k,v in opt.best_params_.items()}
-        with open(os.path.join(output_dir, f'best_{model_name}_params.json'), 'w') as f: json.dump(s_params, f, indent=2)
-        metrics = evaluate_model(best_model, X_test, y_test, model_name, output_dir)
-        metrics.update(cv_metrics); metrics['Best_Params'] = s_params
-
-        if not X_test.empty:
-            try:
-                X_test_sample = X_test.sample(n=min(200, len(X_test)), random_state=random_state_seed) if len(X_test) > 200 else X_test
-                if X_test_sample.empty: raise ValueError("X_test_sample for SHAP is empty.")
-                if model_name == "OLS":
-                    X_train_s_shap = X_train.sample(n=min(500, len(X_train)), random_state=random_state_seed) if len(X_train) > 500 else X_train
-                    explainer = shap.LinearExplainer(best_model, X_train_s_shap); shap_values = explainer.shap_values(X_test_sample)
-                    shap.summary_plot(shap_values, X_test_sample, plot_type="bar", max_display=15, show=False)
-                else:
-                    masker = shap.maskers.Independent(data=X_test_sample)
-                    explainer = shap.TreeExplainer(best_model, masker) if model_name in ["RandomForest", "XGBoost", "LightGBM"] else shap.Explainer(best_model, masker)
-                    shap_obj = explainer(X_test_sample, check_additivity=False)
-                    shap.plots.beeswarm(shap_obj, max_display=15, show=False)
-                plt.title(f"SHAP - {model_name}"); plt.tight_layout(); plt.savefig(os.path.join(output_dir, f'shap_{model_name}.png'),dpi=300); plt.close()
-            except Exception as e: print(f"SHAP failed for {model_name}: {e}")
-        return best_model, opt.best_params_, metrics
-    except Exception as e: print(f"Error training {model_name}: {e}"); traceback.print_exc(); return None, None, {}
-
-
-# Add these fixes right after analyze_target_variable call
-
-def preprocess_target_variable(y_raw, method='log_transform'):
-    """
-    Preprocess the target variable to handle extreme skewness
-    """
-    y_original = y_raw.copy()
+    if len(X_train) < 10:
+        print(f"Skipping {model_name}: Insufficient training data ({len(X_train)} samples).")
+        return None, None, {}
     
-    if method == 'cap_outliers':
-        # Option 1: Cap extreme outliers at 99th percentile
-        cap_value = y_raw.quantile(0.99)
-        y_processed = y_raw.clip(upper=cap_value)
-        capped_count = (y_raw > cap_value).sum()
-        print(f"Capped {capped_count} values above {cap_value:.2f}")
-        
-    elif method == 'remove_extremes':
-        # Option 2: Remove extreme outliers completely
-        mask = y_raw <= y_raw.quantile(0.99)
-        y_processed = y_raw[mask]
-        removed_count = (~mask).sum()
-        print(f"Removed {removed_count} extreme outlier samples")
-        return y_processed, mask
-        
-    elif method == 'log_transform':
-        # Option 3: Log transform (handles zeros by adding small constant)
-        y_processed = np.log1p(y_raw)  # log(1 + x)
-        print(f"Applied log1p transformation")
-        
-    elif method == 'sqrt_transform':
-        # Option 4: Square root transform
-        y_processed = np.sqrt(y_raw)
-        print(f"Applied square root transformation")
-        
-    elif method == 'combined':
-        # Option 5: Cap + Log transform
-        cap_value = y_raw.quantile(0.95)  # More aggressive capping
-        y_capped = y_raw.clip(upper=cap_value)
-        y_processed = np.log1p(y_capped)
-        capped_count = (y_raw > cap_value).sum()
-        print(f"Capped {capped_count} values above {cap_value:.2f} then applied log1p")
-    
+    if hasattr(model_instance, 'random_state'):
+        model_instance.set_params(random_state=random_state_seed)
+    if model_name == 'XGBoost' and hasattr(model_instance, 'seed'):
+        model_instance.set_params(seed=random_state_seed)
+
+    nan_count_x = X_train.isnull().sum().sum()
+    nan_count_y = y_train.isnull().sum()
+    if nan_count_x > 0 or nan_count_y > 0:
+        print(f"Warning: {nan_count_x} NaN values in X_train, {nan_count_y} in y_train. Imputing with median.")
+        X_train = X_train.copy().replace([np.inf, -np.inf], np.nan)
+        imputer = SimpleImputer(strategy='median')
+        X_train = pd.DataFrame(imputer.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
+        y_train = pd.Series(imputer.fit_transform(y_train.values.reshape(-1, 1)).ravel(), index=y_train.index)
+
+    y_train_bins_hpo = make_stratified_bins(y_train, n_bins=5)
+    stratify_hpo = y_train_bins_hpo if y_train_bins_hpo is not None and y_train_bins_hpo.nunique() > 1 else None
+    min_val_size = max(2, int(0.15 * len(X_train)))
+    test_size_hpo = min_val_size / len(X_train) if len(X_train) > min_val_size else 0.0
+    if len(X_train) < 2 or test_size_hpo == 0.0:
+        print("Warning: Using test set as validation due to small training data.")
+        X_val_hpo, y_val_hpo = X_test.copy(), y_test.copy()
     else:
-        y_processed = y_raw
+        _, X_val_hpo, _, y_val_hpo = train_test_split(X_train, y_train, test_size=test_size_hpo, random_state=random_state_seed, stratify=stratify_hpo)
+
+    fit_kwargs = {}
+    if model_name == "XGBoost":
+        fit_kwargs = {'eval_set': [(X_val_hpo, y_val_hpo)], 'verbose': False}
+    elif model_name == "LightGBM":
+        fit_kwargs = {'callbacks': [lgb.early_stopping(stopping_rounds=10, verbose=-1)], 'eval_set': [(X_val_hpo, y_val_hpo)]}
+
+    y_cv_bins_bayes = make_stratified_bins(y_train, n_bins=cv_splitter_obj.get_n_splits())
+    cv_iter_bayes = KFold(n_splits=cv_splitter_obj.get_n_splits(), shuffle=True, random_state=cv_splitter_obj.random_state) if y_cv_bins_bayes is None or y_cv_bins_bayes.nunique() < 2 else cv_splitter_obj.split(X_train, y_cv_bins_bayes)
+
+    opt = BayesSearchCV(model_instance, search_space, n_iter=15 if model_name != 'Ridge' else 3, cv=cv_iter_bayes, n_jobs=2, scoring='neg_mean_squared_error', random_state=random_state_seed, verbose=0)
+    print(f"Starting HPO for {model_name} with {len(X_train)} samples...")
+    opt.fit(X_train, y_train, **fit_kwargs)
+    print(f"HPO completed for {model_name}.")
     
-    # Show before/after stats
-    print(f"\nBefore: Mean={y_original.mean():.3f}, Std={y_original.std():.3f}, Max={y_original.max():.3f}")
-    print(f"After:  Mean={y_processed.mean():.3f}, Std={y_processed.std():.3f}, Max={y_processed.max():.3f}")
+    best_model = opt.best_estimator_
+    cv_metrics = cross_validate_model_with_skf(best_model, X_train, y_train, cv_splitter_obj)
     
-    return y_processed, None
+    joblib.dump(best_model, os.path.join(output_dir, f'best_{model_name}.joblib'))
+    print(f"Saved model: best_{model_name}.joblib")
+    
+    best_params = {k: (v.item() if hasattr(v, 'item') else v) for k, v in opt.best_params_.items()}
+    with open(os.path.join(output_dir, f'best_{model_name}_params.json'), 'w') as f:
+        json.dump(best_params, f, indent=2)
+    print(f"Saved parameters: best_{model_name}_params.json")
+    
+    metrics = evaluate_model(best_model, X_test, y_test, model_name, output_dir)
+    metrics.update(cv_metrics)
+    metrics['Best_Params'] = best_params
 
+    if not X_test.empty:
+        generate_enhanced_shap_analysis(best_model, X_train, X_test, y_train, model_name, output_dir, random_state_seed)
 
-def main():
-    print(f"{datetime.now()} Starting Analysis")
-    output_dir = 'results_regression_v4'; os.makedirs(output_dir, exist_ok=True)
-    data_path = "/Users/kerenlint/Projects/Afeka/models_weight/all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json" #  <--- USER: VERIFY THIS PATH
-    try:
-        with open(data_path, 'r', encoding='utf-8') as f: data = json.load(f)
-        # data = data[:800] # Dev subset
-    except Exception as e: print(f"Fatal: Data loading failed: {e}"); return
+    return best_model, best_params, metrics
 
-    raw_df = extract_features(data)
-    if raw_df.empty or 'pledged_to_goal_ratio' not in raw_df.columns: print("Error: No data after extraction."); return
-    raw_df = raw_df.dropna(subset=['pledged_to_goal_ratio'])
-    if raw_df.empty: print("Error: Data empty after dropping NaNs in target."); return
-    X_raw = raw_df.drop(columns=['pledged_to_goal_ratio']); y_raw = raw_df['pledged_to_goal_ratio']
+def preprocess_target_variable_improved(y_raw, method='cap_and_log'):
+    y = pd.Series(y_raw).copy()
+    mask = None
+    
+    if method == 'cap_and_log':
+        cap_value = y.quantile(0.95)
+        y_capped = y.clip(upper=cap_value)
+        y_final = np.log1p(y_capped)
+        print(f"Capped {sum(y_raw > cap_value)} values above {cap_value:.2f}, then applied log1p")
+        
+    elif method == 'winsorize_and_log':
+        from scipy.stats import mstats
+        y_winsorized = pd.Series(mstats.winsorize(y, limits=[0.01, 0.01]))
+        y_final = np.log1p(y_winsorized)
+        print("Applied winsorization (1% each tail) then log1p")
+        
+    else:
+        y_final = np.log1p(y)
+        print("Applied log1p transformation")
+    
+    print(f"\nBefore: Mean={y_raw.mean():.3f}, Std={y_raw.std():.3f}, Max={y_raw.max():.3f}")
+    print(f"After:  Mean={y_final.mean():.3f}, Std={y_final.std():.3f}, Max={y_final.max():.3f}")
+    return y_final, mask
 
-    y_raw = analyze_target_variable(y_raw)
+def analyze_target_variable(y_raw):
+    y = pd.Series(y_raw)
+    print("=== TARGET VARIABLE ANALYSIS ===")
+    print(f"Shape: {y.shape}")
+    print(f"Min: {y.min():.3f}")
+    print(f"Max: {y.max():.3f}")
+    print(f"Mean: {y.mean():.3f}")
+    print(f"Median: {y.median():.3f}")
+    print(f"Std: {y.std():.3f}")
+    percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
+    print("\nPercentiles:")
+    for p in percentiles:
+        print(f"{p}%: {y.quantile(p/100):.3f}")
+    q99 = y.quantile(0.99)
+    extreme_count = (y > q99).sum()
+    print(f"\nValues above 99th percentile: {extreme_count} ({extreme_count/len(y)*100:.1f}%)")
+    return y
 
-    y_raw_processed, _ = preprocess_target_variable(y_raw, method='log_transform')
-    y_raw = y_raw_processed
-
-
-    correlations = X_raw.select_dtypes(include=[np.number]).corrwith(y_raw).abs().sort_values(ascending=False)
-    print("\nTop 10 feature correlations with target (log-transformed):")
+def analyze_correlations_pure_features_only(X_raw, y_log):
+    embedding_patterns = ['Story_emb_', 'Risks_emb_', 'StorySVD_', 'RisksSVD_']
+    pure_feature_cols = [col for col in X_raw.columns 
+                        if not any(col.startswith(pattern) for pattern in embedding_patterns)]
+    
+    X_pure = X_raw[pure_feature_cols]
+    correlations = X_pure.select_dtypes(include=[np.number]).corrwith(y_log).abs().sort_values(ascending=False)
+    
+    print("\nTop 10 PURE feature correlations with target (log-transformed):")
     print(correlations.head(10))
+    return correlations
+
+def analyze_funding_success_patterns(y_raw):
+    def categorize_funding(ratio):
+        if ratio < 0.01:
+            return "Complete Failure (< 1%)"
+        elif ratio < 0.1:
+            return "Major Failure (1-10%)"
+        elif ratio < 0.8:
+            return "Underfunded (10-80%)"
+        elif ratio <= 1.2:
+            return "Successfully Funded (80-120%)"
+        elif ratio <= 2.0:
+            return "Overfunded (120-200%)"
+        else:
+            return "Major Success (> 200%)"
+    
+    categories = y_raw.apply(categorize_funding)
+    category_counts = categories.value_counts()
+    category_percentages = (category_counts / len(y_raw) * 100).round(1)
+    
+    print("\n=== ACTUAL FUNDING DISTRIBUTION ===")
+    for category, count in category_counts.items():
+        pct = category_percentages[category]
+        print(f"{category}: {count:,} projects ({pct}%)")
+    
+    return categories, category_counts
+
+def save_comprehensive_results(results, output_dir):
+    if not results:
+        print("No results to save.")
+        return
+    
+    res_df = pd.DataFrame(results)
+    
+    column_order = [
+        'model', 'RMSE', 'MAE', 'R2', 'MSE', 'Within_20_Percent', 
+        'Classification_Accuracy', 'CV_R2', 'CV_R2_std', 'CV_RMSE', 
+        'CV_RMSE_std', 'CV_MAE', 'CV_MAE_std', 'Best_Params'
+    ]
+    
+    existing_columns = [col for col in column_order if col in res_df.columns]
+    res_df = res_df[existing_columns]
+    
+    res_df_sorted = res_df.sort_values('R2', ascending=False)
+    
+    results_file = os.path.join(output_dir, 'model_comparison.csv')
+    res_df_sorted.to_csv(results_file, index=False)
+    print(f"Saved comprehensive model comparison to: {results_file}")
+    
+    summary_stats = {
+        'total_models': len(res_df),
+        'best_model': res_df_sorted.iloc[0]['model'],
+        'best_r2': float(res_df_sorted.iloc[0]['R2']),
+        'best_rmse': float(res_df_sorted.iloc[0]['RMSE']),
+        'best_mae': float(res_df_sorted.iloc[0]['MAE']),
+        'model_rankings': res_df_sorted[['model', 'R2', 'RMSE', 'MAE']].to_dict('records')
+    }
+    
+    summary_file = os.path.join(output_dir, 'model_summary.json')
+    with open(summary_file, 'w') as f:
+        json.dump(summary_stats, f, indent=2)
+    print(f"Saved model summary to: {summary_file}")
+    
+    return res_df_sorted
+
+def create_detailed_outcome_bands_visualization_real(y_raw, output_dir):
+    """
+    Creates a detailed bar chart visualization of actual project outcome bands.
+    
+    Args:
+        y_raw (pd.Series): Series containing the actual pledged_to_goal_ratio values.
+        output_dir (str): Directory to save the output files.
+    
+    Returns:
+        tuple: (band_counts, percentages) DataFrames with counts and percentages.
+    """
+    # Input validation
+    if y_raw.empty or not pd.api.types.is_numeric_dtype(y_raw):
+        raise ValueError("y_raw must be a non-empty numeric Series.")
+    
+    y_raw = y_raw.dropna()  # Remove NaN values to avoid issues in binning
+    
+    def bin_ratio(ratio):
+        """Categorizes a funding ratio into outcome bands."""
+        if pd.isna(ratio) or ratio < 0.1:
+            return "Failed (< 0.1)"
+        elif ratio < 0.8:
+            return "Underfunded (0.1 ≤ x < 0.8)"
+        elif ratio <= 1.2:
+            return "Just Funded (0.8 ≤ x ≤ 1.2)"
+        else:
+            return "Overfunded (> 1.2)"
+
+    # Apply binning to real values
+    banded_results = pd.Series(y_raw).apply(bin_ratio)
+    band_counts = banded_results.value_counts().reindex(
+        ["Failed (< 0.1)", "Underfunded (0.1 ≤ x < 0.8)", "Just Funded (0.8 ≤ x ≤ 1.2)", "Overfunded (> 1.2)"],
+        fill_value=0
+    ).astype(int)
+    
+    # Calculate percentages
+    percentages = (band_counts / band_counts.sum() * 100).round(1)
+    
+    # Define consistent colors matching the predicted chart
+    colors = ['#1f77b4', '#ff7f0e', '#9467bd', '#d62728']
+    
+    # Create bar chart
+    fig, ax = plt.subplots(figsize=(12, 8))
+    bottom = np.zeros(1)  # Single bar for all data
+    for i, outcome in enumerate(band_counts.index):
+        values = [band_counts[outcome]]
+        bars = ax.bar(0, values, bottom=bottom, label=outcome, color=colors[i], edgecolor='black', linewidth=1.2)
+        
+        for bar, value in zip(bars, values):
+            if value > 0:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., bottom[0] + height/2.,
+                       f'{int(value)}', ha='center', va='center', fontsize=11, fontweight='bold')
+        
+        bottom += values
+    
+    ax.text(0, band_counts.sum() + 100, f'Total: {int(band_counts.sum())}', ha='center', fontsize=12, fontweight='bold')
+    ax.set_ylim(0, band_counts.sum() * 1.1)
+    ax.set_xlabel('Actual Outcomes', fontsize=12)
+    ax.set_ylabel('Number of Projects', fontsize=12)
+    ax.set_title('Distribution of Actual Project Outcomes', fontsize=14, fontweight='bold')
+    ax.set_xticks([0])
+    ax.set_xticklabels(['All Data'], fontsize=11)
+    
+    ax.legend(title='Actual Outcome Band', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format(int(x), ',')))
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'actual_outcomes_bands_detailed.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Save counts and percentages to CSV
+    band_counts.to_csv(os.path.join(output_dir, 'actual_outcomes_summary_detailed.csv'))
+    percentages.to_csv(os.path.join(output_dir, 'actual_outcomes_percentages.csv'))
+    
+    print(f"Created detailed outcome bands visualization for actual values")
+    return band_counts, percentages
 
 
+from datetime import datetime
+import os
+import json
+import pandas as pd
+import numpy as np
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from tqdm.auto import tqdm
+
+def main(data_path):
+    """
+    Main function to analyze project funding data, train models, and visualize outcomes.
+    
+    Args:
+        data_path (str): Path to the JSON file containing project data.
+    
+    Returns:
+        None: Saves results to the 'results_regression_v4' directory.
+    """
+    print(f"{datetime.now()} Starting Analysis")
+    output_dir = 'results_regression_v4'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    try:
+        with open(data_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Fatal: Data loading failed: {e}")
+        return
+
+    # Extract features from raw data
+    raw_df = extract_features(data)
+    X_raw = raw_df.drop(columns=['pledged_to_goal_ratio'])
+    y_raw = raw_df['pledged_to_goal_ratio']
+
+    # Analyze and visualize actual outcomes
+    band_counts_actual, percentages_actual = create_detailed_outcome_bands_visualization_real(y_raw, output_dir)
+
+    # Analyze target variable
+    y_raw = analyze_target_variable(y_raw)
+    y_processed, remove_mask = preprocess_target_variable_improved(y_raw, method='cap_and_log')
+
+    if remove_mask is not None:
+        X_raw = X_raw[remove_mask]
+        y_processed = y_processed.reset_index(drop=True)
+    y_log = y_processed
+
+    # Analyze correlations and funding patterns
+    correlations_pure = analyze_correlations_pure_features_only(X_raw, y_log)
+    funding_categories, category_counts = analyze_funding_success_patterns(y_raw)
+
+    print(f"\n=== PURE FEATURE INSIGHTS ===")
+    print(f"Total pure features analyzed: {len(correlations_pure)}")
+    print(f"Features with correlation > 0.3: {sum(correlations_pure > 0.3)}")
+    print(f"Features with correlation > 0.2: {sum(correlations_pure > 0.2)}")
+    print(f"\nWeakest correlations (bottom 5):")
+    print(correlations_pure.tail())
+
+    successful_projects = sum(category_counts[cat] for cat in category_counts.index 
+                            if 'Successfully Funded' in cat or 'Overfunded' in cat or 'Major Success' in cat)
+    print(f"\n=== BUSINESS INSIGHTS ===")
+    print(f"Total successful projects (>80% funded): {successful_projects:,} ({successful_projects/len(y_raw)*100:.1f}%)")
+    print(f"Median funding ratio: {y_raw.median():.1%}")
+    print(f"Projects that exceeded goal: {sum(y_raw > 1.0):,} ({sum(y_raw > 1.0)/len(y_raw)*100:.1f}%)")
     print(f"Data shape after cleaning: {raw_df.shape}")
-    print(f"Target variable stats: min={y_raw.min():.3f}, max={y_raw.max():.3f}, std={y_raw.std():.3f}")
+    print(f"Target variable stats: min={y_log.min():.3f}, max={y_log.max():.3f}, std={y_log.std():.3f}")
     print(f"Feature columns: {len(X_raw.columns)}")
 
-    y_bins_raw_split = make_stratified_bins(y_raw, n_bins=5)
+    # Split data
+    y_bins_raw_split = make_stratified_bins(y_log, n_bins=5)
     stratify_raw = y_bins_raw_split if y_bins_raw_split is not None and y_bins_raw_split.nunique() > 1 else None
-    try: X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(X_raw, y_raw, test_size=0.2, random_state=SEED, stratify=stratify_raw)
-    except ValueError: X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(X_raw, y_raw, test_size=0.2, random_state=SEED)
-    
-    X_train_no_o, y_train_no_o = remove_outliers(X_train_r, y_train_r)
-    if X_train_no_o.empty: print("Error: Training data empty after outlier removal."); return
+    try:
+        X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(X_raw, y_log, test_size=0.2, random_state=SEED, stratify=stratify_raw)
+    except ValueError:
+        X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(X_raw, y_log, test_size=0.2, random_state=SEED)
 
-    s_cols = [c for c in X_train_no_o.columns if c.startswith("Story_emb_")]
-    r_cols = [c for c in X_train_no_o.columns if c.startswith("Risks_emb_")]
+    # Outlier check
+    X_train_no_o, y_train_no_o, outlier_mask = remove_outliers(X_train_r, y_train_r, threshold=3, remove=False)
+    print(f"Training data after outlier check: {len(X_train_no_o)} rows, {sum(~outlier_mask)} outliers flagged.")
+    if X_train_no_o.empty:
+        print("Error: Training data empty after outlier check.")
+        return
+
+    # Preprocess data
+    s_cols = []
+    r_cols = []
     preproc = DataPreprocessor(story_cols=s_cols, risks_cols=r_cols, output_dir=output_dir, random_state=SEED)
     preproc.fit(X_train_no_o.copy(), y_train_no_o.copy())
     X_train_p = preproc.transform(X_train_no_o.copy())
-    y_train_f = y_train_no_o.reset_index(drop=True) # y_train_no_o already has reset index from remove_outliers
+    y_train_f = y_train_no_o.reset_index(drop=True)
     X_train_p = X_train_p.reset_index(drop=True)
     X_test_p = preproc.transform(X_test_r.copy())
     y_test_f = y_test_r.reset_index(drop=True)
-    X_test_p = X_test_p.reset_index(drop=True)
 
     if len(X_train_p) != len(y_train_f) or len(X_test_p) != len(y_test_f):
         print(f"Length Mismatch! Train X:{len(X_train_p)} y:{len(y_train_f)}. Test X:{len(X_test_p)} y:{len(y_test_f)}")
         return
-    if X_train_p.empty or X_test_p.empty: print("Error: Processed data is empty."); return
+    if X_train_p.empty or X_test_p.empty:
+        print("Error: Processed data is empty.")
+        return
 
+    # Define models and search spaces
     models = {
-        'RandomForest': (RandomForestRegressor(random_state=SEED), {'n_estimators': Integer(50,200),'max_depth':Integer(5,15),'min_samples_split':Integer(2,10),'min_samples_leaf': Integer(2,10),'max_features':Real(0.6,0.9)}),
-        'XGBoost': (XGBRegressor(objective='reg:squarederror', random_state=SEED, seed=SEED, tree_method='hist'),{'n_estimators':Integer(50,300),'max_depth':Integer(3,10),'learning_rate':Real(0.01,0.2,prior='log-uniform'),'subsample':Real(0.7,1.0)}),
-        'LightGBM': (lgb.LGBMRegressor(random_state=SEED,force_col_wise=True,verbosity=-1),{'n_estimators':Integer(50,300),'max_depth':Integer(3,10),'learning_rate':Real(0.01,0.2,prior='log-uniform'), 'num_leaves':Integer(10,50)}),
-        'OLS': (Ridge(alpha=1e-3), {'fit_intercept': Categorical([True, False]), 'alpha': Real(1e-6, 1e-1, prior='log-uniform')})
+        'RandomForest': (RandomForestRegressor(random_state=SEED), {
+            'n_estimators': Integer(50, 200), 'max_depth': Integer(5, 15),
+            'min_samples_split': Integer(2, 10), 'min_samples_leaf': Integer(2, 10),
+            'max_features': Real(0.6, 0.9)
+        }),
+        'XGBoost': (XGBRegressor(objective='reg:squarederror', random_state=SEED, seed=SEED, tree_method='hist'), {
+            'n_estimators': Integer(50, 300), 'max_depth': Integer(3, 10),
+            'learning_rate': Real(0.01, 0.2, prior='log-uniform'), 'subsample': Real(0.7, 1.0)
+        }),
+        'LightGBM': (lgb.LGBMRegressor(random_state=SEED, force_col_wise=True, verbosity=-1), {
+            'n_estimators': Integer(50, 300), 'max_depth': Integer(3, 10),
+            'learning_rate': Real(0.01, 0.2, prior='log-uniform'), 'num_leaves': Integer(10, 50)
+        }),
+        'Ridge': (Ridge(alpha=1e-3), {
+            'alpha': Real(1e-6, 1e-1, prior='log-uniform'),
+            'fit_intercept': Categorical([True, False])
+        })
     }
-    print(f"Data shape after cleaning: {raw_df.shape}")
-    print(f"Target variable stats: min={y_raw.min():.3f}, max={y_raw.max():.3f}, std={y_raw.std():.3f}")
-    print(f"Feature columns: {len(X_raw.columns)}")
+    
+    # Train models
     results = []
+    best_models = {}
     skf_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
-    for name, (model, space) in tqdm(models.items(), desc="Training Models"):
-        _, _, metrics = train_model(X_train_p, y_train_f, X_test_p, y_test_f, model, space, skf_cv, name, output_dir, SEED)
-        if metrics: results.append(metrics)
-    if not results: print("No models trained."); return
+    
+    print("Starting model training loop...")
+    for name, (model, space) in tqdm(models.items(), desc="Training Models", total=len(models)):
+        print(f"Training {name}...")
+        best_model, best_params, metrics = train_model(X_train_p, y_train_f, X_test_p, y_test_f, model, space, skf_cv, name, output_dir, SEED)
+        if metrics:
+            results.append(metrics)
+            best_models[name] = best_model
 
-    res_df = pd.DataFrame(results).sort_values('R2', ascending=False)
-    res_df.to_csv(os.path.join(output_dir, 'model_comparison.csv'), index=False)
-    print(f"\n{datetime.now()} Saved comparison.\nTop Models:\n{res_df[['model', 'R2', 'CV_R2', 'RMSE']].head()}")
+    if not results:
+        print("No models trained.")
+        return
+
+    res_df = save_comprehensive_results(results, output_dir)
+    print(f"\n{datetime.now()} Saved comprehensive results.")
+    print(f"Top Models:\n{res_df[['model', 'R2', 'CV_R2', 'RMSE']].head()}")
+    
     if not res_df.empty:
-        plt.figure(figsize=(10,7)); sns.barplot(x='R2',y='model',data=res_df,palette='viridis',orient='h')
-        plt.title('R² Comparison'); plt.xlabel('R² Score'); plt.ylabel('Model'); plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'r2_comparison.png'), dpi=300); plt.close()
+        plt.figure(figsize=(10, 7))
+        sns.barplot(x='R2', y='model', data=res_df, palette='viridis', orient='h')
+        plt.title('R² Comparison')
+        plt.xlabel('R² Score')
+        plt.ylabel('Model')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'r2_comparison.png'), dpi=300)
+        plt.close()
+
+    # Generate predictions for full dataset
+    X_full_p = preproc.transform(X_raw.reset_index(drop=True))
+    print(f"Full dataset shape after preprocessing: {X_full_p.shape}")
+    
+    predictions_log = {}
+    predictions = {}
+    
+    for model_name, model in best_models.items():
+        pred_log = model.predict(X_full_p)
+        predictions_log[model_name] = pred_log
+        predictions[model_name] = np.expm1(pred_log)
+        predictions[model_name] = np.where(np.isnan(predictions[model_name]), 0, predictions[model_name])
+    
+    predictions_df = pd.DataFrame(predictions)
+    band_counts_orig, percentages = create_detailed_outcome_bands_visualization(predictions_df, output_dir)
+
+    # Final summary including actual outcomes
+    final_summary = {
+        'analysis_completed': str(datetime.now()),
+        'total_projects_analyzed': len(X_raw),
+        'models_trained': list(best_models.keys()),
+        'best_performing_model': res_df.iloc[0]['model'],
+        'actual_outcome_distribution': {
+            'counts': band_counts_actual.to_dict(),
+            'percentages': percentages_actual.to_dict()
+        },
+        'files_generated': {
+            'model_comparison': 'model_comparison.csv',
+            'model_summary': 'model_summary.json',
+            'joblib_files': [f'best_{name}.joblib' for name in best_models.keys()],
+            'params_files': [f'best_{name}_params.json' for name in best_models.keys()],
+            'shap_files': [f'shap_{name}_top_*_features.png' for name in best_models.keys()],
+            'shap_bar_charts': [f'shap_{name}_bar_chart.png' for name in best_models.keys()],
+            'shap_importance_files': [f'shap_feature_importance_{name}.csv' for name in best_models.keys()],
+            'shap_summary_files': [f'shap_summary_{name}.json' for name in best_models.keys()],
+            'outcome_visualizations': ['predicted_outcomes_bands_detailed.png', 'predicted_outcomes_bands_percentage.png'],
+            'actual_outcome_files': ['actual_outcomes_summary_detailed.csv', 'actual_outcomes_percentages.csv']
+        }
+    }
+    
+    with open(os.path.join(output_dir, 'analysis_summary.json'), 'w') as f:
+        json.dump(final_summary, f, indent=2)
+
+    print(f"Total rows processed: {len(predictions_df)} out of {len(X_raw)} expected.")
     print(f"\n{datetime.now()} Analysis Complete")
-
-
-def analyze_target_variable(y_raw):
-    print("=== TARGET VARIABLE ANALYSIS ===")
-    print(f"Shape: {y_raw.shape}")
-    print(f"Min: {y_raw.min():.3f}")
-    print(f"Max: {y_raw.max():.3f}")
-    print(f"Mean: {y_raw.mean():.3f}")
-    print(f"Median: {y_raw.median():.3f}")
-    print(f"Std: {y_raw.std():.3f}")
-    
-    # Percentiles
-    percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
-    print("\nPercentiles:")
-    for p in percentiles:
-        print(f"{p}%: {y_raw.quantile(p/100):.3f}")
-    
-    # Count extreme values
-    q99 = y_raw.quantile(0.99)
-    extreme_count = (y_raw > q99).sum()
-    print(f"\nValues above 99th percentile: {extreme_count} ({extreme_count/len(y_raw)*100:.1f}%)")
-    
-    # Distribution
-    plt.figure(figsize=(15, 5))
-    
-    plt.subplot(1, 3, 1)
-    plt.hist(y_raw, bins=50, alpha=0.7)
-    plt.title('Raw Distribution')
-    plt.xlabel('pledged_to_goal_ratio')
-    
-    plt.subplot(1, 3, 2)
-    plt.hist(y_raw[y_raw <= y_raw.quantile(0.95)], bins=50, alpha=0.7)
-    plt.title('Distribution (95th percentile cutoff)')
-    plt.xlabel('pledged_to_goal_ratio')
-    
-    plt.subplot(1, 3, 3)
-    plt.boxplot(y_raw)
-    plt.title('Box Plot')
-    plt.ylabel('pledged_to_goal_ratio')
-    
-    plt.tight_layout()
-    plt.savefig('target_analysis.png', dpi=300)
-    plt.close()
-    
-    return y_raw
-
-
+    print(f"\nAll files saved to: {output_dir}")
+    print("Generated files:")
+    for category, files in final_summary['files_generated'].items():
+        if isinstance(files, list):
+            print(f"  {category}: {len(files)} files")
+        else:
+            print(f"  {category}: {files}")
 
 if __name__ == "__main__":
-    try: main()
-    except Exception as e: print(f"Fatal error: {e}"); traceback.print_exc()
+    data_path = "/Users/kerenlint/Projects/Afeka/models_weight/all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json"
+    try:
+        main(data_path)
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        traceback.print_exc()
+

@@ -1,96 +1,99 @@
-# Kickstarter ML Pipelines 🧠📊
+# Kickstarter Regression Analysis Pipeline
 
-This project provides a set of powerful, scalable machine learning pipelines for classification and regression on Kickstarter project data. The pipelines include support for structured features, textual embeddings (MiniLM, RoBERTa, ModernBERT), readability and sentiment metrics, and SHAP-based explainability.
+## Overview
 
----
+This project performs a comprehensive regression-based analysis of Kickstarter campaigns, with a specific focus on modeling the `pledged_to_goal_ratio`. The pipeline includes:
 
-## 📁 Contents
+* Feature extraction from JSON data (including embeddings)
+* Preprocessing: imputation, scaling, feature selection
+* Model training with Bayesian hyperparameter optimization (BayesSearchCV)
+* Evaluation with both standard regression metrics and custom band accuracy
+* SHAP analysis for feature explainability
+* Visualizations of predicted and actual outcome distributions
 
-### 1. `regression_pipeline_with_embeddings_and_shap.py`
-- Predicts numerical outcomes like `pledged` or `pledged_ratio`.
-- Supports LightGBM, XGBoost, RandomForest, and linear models.
-- Includes:
-  - PCA on MiniLM embeddings
-  - Stratified train/test split
-  - SHAP value visualizations
-  - `BayesSearchCV` optimization
+## Features
 
-### 2. `xgboost_rf_automl_with_shap.py`
-- Classification pipeline for `successful` vs `failed` projects.
-- Models: LightGBM, XGBoost, CatBoost, RandomForest.
-- Key Features:
-  - Clean handling of embeddings
-  - Extensive Bayesian optimization
-  - Modular design for evaluation, SHAP, and metrics
-  - Feature importance extraction and visualization
+* Support for LightGBM, XGBoost, RandomForest, and Ridge regression models
+* Target variable transformations (log1p, capping, winsorizing)
+* Stratified cross-validation using custom quantile binning
+* SHAP importance plots (bar, beeswarm) + saved CSVs and summaries
+* Custom band-based accuracy: Failed / Underfunded / Just Funded / Overfunded
+* Clear and interpretable business insights
 
-### 3. `ols_regrassion.py`
-- Classic linear regression variants: OLS, Ridge, Lasso, ElasticNet.
-- Used for interpretable modeling of pledged amount.
-- SHAP and Lasso-based feature selection supported.
+## Requirements
 
----
+* Python 3.8+
+* Key packages:
 
-## 🧪 Example Input
+  * `scikit-learn`
+  * `xgboost`
+  * `lightgbm`
+  * `shap`
+  * `scipy`, `pandas`, `numpy`, `matplotlib`, `seaborn`
+  * `tqdm`, `joblib`, `skopt`
 
-```json
-{
-  "state": "successful",
-  "story_miniLM": [0.123, -0.234, ...],  # 384-dim
-  "Risks and Challenges Analysis": {
-    "Readability Scores": {
-      "Flesch Reading Ease": 58.4
-    },
-    ...
-  },
-  "projectFAQsCount": 2,
-  "rewardscount": 5,
-  "category_Web": true,
-  ...
-}
-```
-
----
-
-## ✅ Output
-
-- Trained model `.pkl` files (e.g., `lightgbm_model.pkl`)
-- Feature importance `.csv`
-- SHAP `.png` explanations
-- Summary results `.md`
-
----
-
-## 🚀 Run Examples
-
-```bash
-python regression_pipeline_with_embeddings_and_shap.py
-python xgboost_rf_automl_with_shap.py
-python ols_regrassion.py
-```
-
----
-
-## 📦 Installation
-
-Use the `requirements.txt`:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+## Directory Structure
 
-## 📈 Requirements
+```
+├── main.py                  # Entry point for running the full pipeline
+├── results_regression_v4/   # Output directory with results and visualizations
+├── all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json
+├── model_comparison.csv     # Summary of all trained models and their metrics
+├── model_summary.json       # Best model and R2-based rankings
+├── actual_outcomes_summary_detailed.csv
+├── predicted_outcomes_bands_detailed.png
+├── shap_summary_<model>.json
+├── shap_feature_importance_<model>.csv
+...
+```
 
-- Python ≥ 3.8
-- LightGBM, XGBoost, scikit-learn
-- imbalanced-learn, SHAP, Optuna, scikit-optimize
+## Running the Pipeline
 
----
+To run the full pipeline on a dataset:
 
-## 🔍 Notes
+```bash
+python main.py
+```
 
-- JSON structure must include consistent embedding and sentiment keys.
-- Automatically handles missing values, constant features, and type issues.
+Edit the file path inside the script (`data_path`) to point to your `.json` file.
+
+## Input Data Format
+
+* JSON list of Kickstarter projects
+* Each entry must include:
+
+  * `pledged_to_goal_ratio`
+  * `goal`, `rewardscount`, `projectFAQsCount`, etc.
+  * Sentiment and readability scores
+  * MiniLM-L12 embeddings for story and risks sections
+
+## Output Artifacts
+
+* Trained model files (`best_<model>.joblib`)
+* Hyperparameters (`best_<model>_params.json`)
+* SHAP plots and CSVs for interpretability
+* Outcome band bar charts (absolute + percentage)
+* Model comparison CSV and summary JSON
+* Full predictions on entire dataset
+
+## Custom Functions & Utilities
+
+* `DataPreprocessor`: Imputation, scaling, encoding, feature selection
+* `make_stratified_bins`: Custom binning for regression stratification
+* `evaluate_model`: Generates metrics and prediction plots
+* `generate_enhanced_shap_analysis`: Computes and saves SHAP plots
+* `create_detailed_outcome_bands_visualization`: For grouped band evaluation
+
+## Notes
+
+* SHAP explanations are restricted to non-embedding features
+* Models are trained using log1p-transformed targets (with optional capping)
+* Predictions are inverse-transformed with `np.expm1`
+* Outlier detection is implemented but non-destructive by default
 
