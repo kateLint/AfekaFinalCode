@@ -28,7 +28,6 @@ NMR2structure/
 ├── main.py                       # Training and evaluation entry point
 ├── model.py                      # Gradient boosting model definitions
 ├── database.py                   # Data loading and substructure mapping
-├── nmrshiftdb2withsignals.sd     # Raw NMRShiftDB2 dataset
 └── README.md                     # Project documentation
 ```
 
