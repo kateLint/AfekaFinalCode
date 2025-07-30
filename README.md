@@ -2,36 +2,39 @@
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7%2B-blue)](https://www.python.org/) [![LightGBM](https://img.shields.io/badge/LightGBM-1.6-orange)](https://lightgbm.readthedocs.io/en/stable/)
 
-A machine learning pipeline to predict kickstarter projects success.
+# AfekaFinalCode – The Impact of Textual Characterization on Project Success
+
+This repository analyzes how textual and structural features of Kickstarter projects affect their success. It includes pipelines for hypothesis testing, machine learning classification, and text analysis.
+
+## Structure
+
+- **hypothesis/**: Scripts testing various hypotheses about project success, including sentiment, readability, risk analysis, and category effects.
+- **training/**: LightGBM training pipeline with preprocessing for structured features, embeddings, sentiment, and readability.
+- **classiffication_comparison/**: Compares machine learning models (XGBoost, RandomForest, LightGBM, CatBoost) using AutoML and SHAP for feature importance.
+- **paraphrase/**: Tools for paraphrasing project narratives using T5 and GPT models.
+
+## Main Files
+
+- `hypothesis/h1.py` – Sentiment analysis and hypothesis testing.
+- `hypothesis/h2.py` – Topic modeling with BERTopic and logistic regression.
+- `hypothesis/h3_story.py` – Readability metrics and their impact on success.
+- `hypothesis/h3_risks.py` – Risk section readability and project outcome.
+- `hypothesis/h4.py` – Category-based analysis and visualizations.
+- `training/train_lighgbm.py` – LightGBM model training with embeddings and feature extraction.
+- `classiffication_comparison/xgboost_rf_automl_with_shap.py` – AutoML experiments and SHAP explainability.
+- `paraphrase/paraphrase_t5_gpt.py` – Paraphrase generation and keyphrase extraction.
+
+## How to Use
+
+1. See each subfolder’s README for details (e.g., `training/README.md`, `classiffication_comparison/README.md`).
+2. Scripts require input datasets as JSON files (see code for paths).
+3. Outputs include trained models, feature lists, classification reports, and visualizations.
+
+## Requirements
+
+- Python (various packages: pandas, numpy, sklearn, lightgbm, xgboost, catboost, transformers, bertopic, SHAP, etc.)
+- See individual script headers and `requirements.txt` for details.
 
 ---
 
-The raw data file all_good_projects_without_embeddings.json were produced from files downloaded from: https://webrobots.io/kickstarter-datasets/ from 2015-2014.
-Then projects from scrapped_projects.json were combined with those files, and clean_data.py created the final all_good_projects_without_embeddings.json
-
-## Prerequisites
-
-- Python 3.7 or higher
-- scikit-learn  
-- numpy  
-- pandas  
-- joblib
-
-# Install dependencies
-pip install scikit-learn numpy pandas joblib
-
-
-## Project Structure
-
-```bash
-NMR2structure/
-├── main.py                       # Training and evaluation entry point
-├── model.py                      # Gradient boosting model definitions
-├── database.py                   # Data loading and substructure mapping
-└── README.md                     # Project documentation
-```
-
-## Evaluation
-
-* General model (166 motifs): AUC = 0.77, Precision = 71%, Recall = 55%
-* Carbohydrate model: AUC = 0.93, Precision = 93%, Recall = 88%
+*This summary covers only a portion of the files. For the complete file list, browse the repository here: [AfekaFinalCode on GitHub](https://github.com/kateLint/AfekaFinalCode).*
