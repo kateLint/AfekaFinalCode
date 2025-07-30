@@ -20,6 +20,8 @@ This repository analyzes how textual and structural features of Kickstarter proj
 - `hypothesis/h3_story.py` – Readability metrics and their impact on success.
 - `hypothesis/h3_risks.py` – Risk section readability and project outcome.
 - `hypothesis/h4.py` – Category-based analysis and visualizations.
+- `hypothesis/h5.py` – Analyzes passive voice usage in project narratives and risks, outputs sentence-level statistics as CSV.
+
 - `training/train_lighgbm.py` – LightGBM model training with embeddings and feature extraction.
 - `classiffication_comparison/xgboost_rf_automl_with_shap.py` – AutoML experiments and SHAP explainability.
 - `paraphrase/paraphrase_t5_gpt.py` – Paraphrase generation and keyphrase extraction.
