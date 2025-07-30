@@ -1,4 +1,4 @@
-# KickstarterStructure
+# Kickstarter Project
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7%2B-blue)](https://www.python.org/) [![LightGBM](https://img.shields.io/badge/LightGBM-1.6-orange)](https://lightgbm.readthedocs.io/en/stable/)
 
