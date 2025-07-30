@@ -7,7 +7,7 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from skopt import BayesSearchCV
 from skopt.space import Real, Integer, Categorical
 from sklearn.dummy import DummyClassifier
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.decomposition import PCA
 from collections import defaultdict
 
@@ -39,19 +39,10 @@ import warnings
 import traceback
 import gc
 
-# --- Basic Configuration ---
 warnings.filterwarnings('ignore')
 gc.enable()
 
-# ==============================================================================
-#                          HELPER FUNCTIONS
-# ==============================================================================
-
 def get_bayes_search_space(model_key):
-    """
-    Returns search space for BayesSearchCV for supported models.
-    Supports: RandomForest, LightGBM, XGBoost, CatBoost.
-    """
     if model_key == 'RandomForest':
         return {
             'classifier__n_estimators': Integer(100, 600),
@@ -90,19 +81,15 @@ def get_bayes_search_space(model_key):
             'classifier__border_count': Integer(32, 128)
         }
 
-    # Default empty dict if model not found
     return {}
 
-# --- Helper function for safe float conversion ---
 def safe_float(value, default=np.nan):
-    """Safely converts a value to float, handling None, non-numeric, and infinities."""
     if value is None: return default
     try:
         f_val = float(value)
         return default if not np.isfinite(f_val) else f_val
     except (ValueError, TypeError): return default
 
-# --- 1. Extract Features (Corrected for Data Leakage, includes Goal) ---
 def extract_features(data, embedding_type=None):
     features = []
     embedding_dimensions = 0
@@ -130,8 +117,8 @@ def extract_features(data, embedding_type=None):
 
             feature_dict = {
                 'projectFAQsCount': safe_float(item.get('projectFAQsCount'), default=0.0),
-                #'commentsCount': safe_float(item.get('commentsCount'), default=0.0),
-                #'updateCount': safe_float(item.get('updateCount'), default=0.0),
+                'commentsCount': safe_float(item.get('commentsCount'), default=0.0),
+                'updateCount': safe_float(item.get('updateCount'), default=0.0),
                 'rewardscount': safe_float(item.get('rewardscount'), default=0.0),
                 'project_length_days': safe_float(item.get('project_length_days'), default=np.nan),
                 'preparation_days': safe_float(item.get('preparation_days'), default=np.nan),
@@ -160,7 +147,6 @@ def extract_features(data, embedding_type=None):
                     is_true = value is True or (isinstance(value, (str, int)) and str(value).lower() in ['true', '1'])
                     feature_dict[key] = 1 if is_true else 0
 
-            # --- Handle Embeddings if requested ---
             current_item_emb_dim = 0
             embedding_type_lower = embedding_type.lower() if embedding_type else None
             if embedding_type_lower in embedding_keys:
@@ -188,7 +174,6 @@ def extract_features(data, embedding_type=None):
                 risks_added = add_embeddings_to_dict(f'risks_{embedding_type_lower}', risks_emb, feature_dict)
                 if embedding_dimensions == 0 and current_item_emb_dim > 0 and (story_added or risks_added):
                     embedding_dimensions = current_item_emb_dim
-            # --- End Embeddings ---
             features.append(feature_dict)
         except Exception as e: extraction_errors += 1; continue
 
@@ -229,13 +214,7 @@ def extract_features(data, embedding_type=None):
 
     return df, approx_dim
 
-# --- 2. Preprocessing Function (No SMOTE) ---
-# (Keep preprocess_data_base as previously defined)
 def preprocess_data_base(X, y):
-    """
-    Base preprocessing: Impute missing values using mean. No scaling or normalization.
-    Returns imputed X as numpy array, y as array, and original column names.
-    """
     print(f"Base Preprocessing data shape: X={X.shape}, y={len(y)}")
 
     if not isinstance(X, pd.DataFrame):
@@ -248,7 +227,6 @@ def preprocess_data_base(X, y):
     else:
         original_columns = X.columns.tolist()
 
-    # Keep only numeric columns
     numeric_cols = X.select_dtypes(include=np.number).columns
     X = X[numeric_cols]
 
@@ -263,7 +241,6 @@ def preprocess_data_base(X, y):
     if X.isna().sum().sum() > 0:
         print(f"NaN values in X before imputation: {X.isna().sum().sum()}")
 
-    # Impute missing values with column mean
     imputer = SimpleImputer(strategy='mean')
     try:
         X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, index=X.index)
@@ -276,9 +253,6 @@ def preprocess_data_base(X, y):
     print(f"Preprocessing complete. Final X shape: {X_imputed.shape}")
     return X_imputed.values, y_array, original_columns
 
-
-# --- 3. Define Specificity Scorer ---
-# (Keep specificity function as previously defined)
 def specificity(y_true, y_pred):
     try:
         cm = confusion_matrix(y_true, y_pred)
@@ -294,11 +268,7 @@ def specificity(y_true, y_pred):
     except Exception as e: print(f"Error calculating specificity: {e}. Returning 0."); return 0.0
 specificity_scorer = make_scorer(specificity, greater_is_better=True)
 
-
-# --- 4. Get Feature Importance ---
-# (Keep get_feature_importance function as previously defined)
 def get_feature_importance(model, feature_names, model_name_full, output_dir):
-    """ Calculates feature importance for fitted models (handles pipelines). """
     print(f"\nCalculating feature importance for {model_name_full}...")
     importances = None; final_estimator = model; final_estimator_name = "N/A"
     if hasattr(model, 'steps'):
@@ -345,12 +315,9 @@ def get_feature_importance(model, feature_names, model_name_full, output_dir):
         return feature_importance_df
     except Exception as e: print(f"  Error calculating importance: {e}"); traceback.print_exc(); return pd.DataFrame()
 
-
-# --- 5 & 6. Reporting and Visualization ---
-# (Keep print_formatted_results, plot_classification_results, visualize_feature_importance as before)
 def print_formatted_results(results_list, output_file=None):
     if not results_list: print("No results to format."); return ""
-    output_lines = []; headers = ["Model Config", "Classifier", "F1 (w)", "Recall (w)", "Prec (w)", "Specificity", "AUC", "Fit Time(s)", "WEIGHT K", "Best Params / Status"]
+    output_lines = []; headers = ["Model Config", "Classifier", "F1 (w)", "Recall (w)", "Prec (w)", "Specificity", "AUC", "Fit Time(s)", "WEIGHT K", "Pred Success", "Pred Failed", "Best Params / Status"]
     output_lines.append("| " + " | ".join(headers) + " |"); output_lines.append("|" + "---|"*len(headers))
     results_list.sort(key=lambda x: x.get('F1 Weighted', -float('inf')) if pd.notna(x.get('F1 Weighted')) else -float('inf'), reverse=True)
     for result in results_list:
@@ -358,6 +325,8 @@ def print_formatted_results(results_list, output_file=None):
         prec_w = f"{result.get('Precision Weighted', np.nan):.4f}"; spec = f"{result.get('Specificity', np.nan):.4f}"
         auc = f"{result.get('AUC', np.nan):.4f}"; fit_time = f"{result.get('Mean Fit Time', np.nan):.2f}"
         smote_k = str(result.get('WEIGHT K', 'N/A'))
+        pred_success = str(result.get('Predicted Successful', 'N/A'))
+        pred_failed = str(result.get('Predicted Failed', 'N/A'))
         params = result.get('Best Params', {}); params_str = "N/A"; status = result.get('Optimization Status', 'OK')
         if status != "OK": params_str = status
         elif isinstance(params, dict) and 'error' in params: params_str = f"Error: {params['error'][:100]}"
@@ -366,7 +335,7 @@ def print_formatted_results(results_list, output_file=None):
              params_str = ", ".join(p_list); params_str = params_str[:147] + "..." if len(params_str) > 150 else params_str
         elif isinstance(params, str): params_str = params
         params_str = params_str.replace('|', ';')
-        line_values = [str(result.get('Model Config', 'N/A')), str(result.get('Classifier', 'N/A')), f1_w, rec_w, prec_w, spec, auc, fit_time, smote_k, params_str]
+        line_values = [str(result.get('Model Config', 'N/A')), str(result.get('Classifier', 'N/A')), f1_w, rec_w, prec_w, spec, auc, fit_time, smote_k, pred_success, pred_failed, params_str]
         output_lines.append("| " + " | ".join(line_values) + " |")
     formatted_text = "\n".join(output_lines); print("\n--- Classification Results Summary (Markdown Format) ---\n" + formatted_text + "\n--- End Summary ---")
     if output_file:
@@ -421,21 +390,89 @@ def visualize_feature_importance(feature_importance_dict, top_n=25, save_path=No
         except Exception as e: print(f"Error saving importance plot: {e}")
     plt.close(fig)
 
-
-# ==============================================================================
-#                   MAIN CLASSIFICATION ANALYSIS FUNCTION
-# ==============================================================================
+def plot_prediction_counts(results_df, save_dir):
+    """Create visualizations for prediction counts"""
+    if results_df.empty: 
+        print("No results to plot prediction counts.")
+        return
+    
+    viz_dir = os.path.join(save_dir, 'visualizations')
+    os.makedirs(viz_dir, exist_ok=True)
+    
+    # Filter out rows without prediction data
+    pred_df = results_df.dropna(subset=['Predicted Successful', 'Predicted Failed']).copy()
+    if pred_df.empty:
+        print("No prediction count data to plot.")
+        return
+    
+    pred_df['Full Model Name'] = pred_df['Model Config'] + " | " + pred_df['Classifier']
+    
+    # Create stacked bar chart for predictions
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12))
+    
+    # Plot 1: Stacked bar chart
+    pred_df_sorted = pred_df.sort_values('F1 Weighted', ascending=True, na_position='first')
+    
+    ax1.barh(pred_df_sorted['Full Model Name'], pred_df_sorted['Predicted Successful'], 
+             label='Predicted Successful', color='green', alpha=0.7)
+    ax1.barh(pred_df_sorted['Full Model Name'], pred_df_sorted['Predicted Failed'], 
+             left=pred_df_sorted['Predicted Successful'], label='Predicted Failed', color='red', alpha=0.7)
+    
+    ax1.set_xlabel('Number of Projects')
+    ax1.set_ylabel('Model')
+    ax1.set_title('Prediction Counts by Model (Stacked)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Success rate percentage
+    pred_df_sorted['Total Predictions'] = pred_df_sorted['Predicted Successful'] + pred_df_sorted['Predicted Failed']
+    pred_df_sorted['Success Rate'] = (pred_df_sorted['Predicted Successful'] / pred_df_sorted['Total Predictions']) * 100
+    
+    bars = ax2.barh(pred_df_sorted['Full Model Name'], pred_df_sorted['Success Rate'], color='skyblue', alpha=0.7)
+    ax2.set_xlabel('Success Rate (%)')
+    ax2.set_ylabel('Model')
+    ax2.set_title('Predicted Success Rate by Model')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim(0, 100)
+    
+    # Add percentage labels on bars
+    for i, bar in enumerate(bars):
+        width = bar.get_width()
+        ax2.text(width + 1, bar.get_y() + bar.get_height()/2, 
+                f'{width:.1f}%', ha='left', va='center', fontsize=10)
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    save_path = os.path.join(viz_dir, "prediction_counts_comparison.png")
+    try:
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"Prediction counts visualization saved: {save_path}")
+    except Exception as e:
+        print(f"Error saving prediction counts plot: {e}")
+    
+    plt.close()
+    
+    # Create summary table
+    summary_path = os.path.join(save_dir, "prediction_summary.csv")
+    summary_df = pred_df[['Model Config', 'Classifier', 'Predicted Successful', 'Predicted Failed', 
+                         'F1 Weighted']].copy()
+    summary_df['Total Predictions'] = pred_df_sorted['Total Predictions']
+    summary_df['Success Rate'] = pred_df_sorted['Success Rate']
+    summary_df = summary_df.sort_values('F1 Weighted', ascending=False, na_position='last')
+    
+    try:
+        summary_df.to_csv(summary_path, index=False)
+        print(f"Prediction summary saved: {summary_path}")
+    except Exception as e:
+        print(f"Error saving prediction summary: {e}")
 
 def main_classification():
-    """
-    Main function for classification comparing specified feature sets across models.
-    """
     global output_dir, model_configs
     output_dir = 'classification_results_weighted_compare_final'
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output will be saved to: {os.path.abspath(output_dir)}")
 
-    # --- Load Data ---
     print("\nLoading data...")
     try:
         data_path = '/Users/kerenlint/Projects/Afeka/models/all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json'
@@ -448,43 +485,25 @@ def main_classification():
 
     all_results = []; feature_importance_dict = {}
 
-    # --- Define Model Configurations ---
-   # model_configs = [
-     #   ("Traditional_Features_Only_Weight_FIX", None, "NO_EMBEDDINGS", False),
-    #    ("PreLaunch_Features_Only_Weight", None, "PRE_LAUNCH_ONLY", False),
-
-    #("Traditional_Features_Only_Weight", None, "NO_EMBEDDINGS", False),
-    #("Features_MiniLM_Weight", 'minilm', None, False),
-    #("Features_RoBERTa_Weight", 'roberta', None, False),
-    #("Features_ModernBERT_Weight", 'modernbert', None, False),
-    #("MiniLM_Only_Weight", 'minilm', "ONLY_EMBEDDINGS", False),
-    #("RoBERTa_Only_Weight", 'roberta', "ONLY_EMBEDDINGS", False),
-    #("ModernBERT_Only_Weight", 'modernbert', "ONLY_EMBEDDINGS", False),
-
-  #  ]
-
-
     model_configs = [
-       # ("PreLaunch_Features_Only_Weight", None, "PRE_LAUNCH_ONLY", False),
-        #("PreLaunch_Features_MiniLM_Weight", 'minilm', "PRE_LAUNCH_ONLY", False),
-       # ("PreLaunch_Features_RoBERTa_Weight", 'roberta', "PRE_LAUNCH_ONLY", False),
-      #  ("PreLaunch_Features_ModernBERT_Weight", 'modernbert', "PRE_LAUNCH_ONLY", False),
-      #  ("MiniLM_PreLaunch_Only_Weight", 'minilm', "ONLY_EMBEDDINGS", False),
-       # ("RoBERTa_PreLaunch_Only_Weight", 'roberta', "ONLY_EMBEDDINGS", False),
-       # ("ModernBERT_PreLaunch_Only_Weight", 'modernbert', "ONLY_EMBEDDINGS", False),
-           ("LightGBM_Feature_Comparison", None, "NO_EMBEDDINGS", False)
-
+        ("Traditional_Features_Only_Weight", None, "NO_EMBEDDINGS", False),
+        ("Features_MiniLM_Weight", 'minilm', None, False),
+        ("Features_RoBERTa_Weight", 'roberta', None, False),
+        ("Features_ModernBERT_Weight", 'modernbert', None, False),
+        ("MiniLM_Only_Weight", 'minilm', "ONLY_EMBEDDINGS", False),
+        ("RoBERTa_Only_Weight", 'roberta', "ONLY_EMBEDDINGS", False),
+        ("ModernBERT_Only_Weight", 'modernbert', "ONLY_EMBEDDINGS", False),
     ]
 
     print(f"\nDefined {len(model_configs)} specific feature configurations for comparison:")
     for cfg in model_configs: print(f"  - {cfg[0]} (Embedding: {cfg[1]}, Filter: {cfg[2]}, WEIGHT: {cfg[3]})")
 
-    # --- Define Classifiers ---
     classifiers = {
         'RandomForest': RandomForestClassifier(random_state=42, n_jobs=-1),
         'LightGBM': lgb.LGBMClassifier(random_state=42, verbose=-1, n_jobs=-1),
         'XGBoost': XGBClassifier(random_state=42, objective='binary:logistic', eval_metric='logloss', use_label_encoder=False, verbosity=0, n_jobs=-1),
-       # 'CatBoost': CatBoostClassifier(random_state=42, verbose=0, allow_writing_files=False, thread_count=-1)
+        'CatBoost': CatBoostClassifier(random_state=42, verbose=0)
+
     }
     print(f"\nClassifiers to compare: {list(classifiers.keys())}")
 
@@ -493,7 +512,6 @@ def main_classification():
     print(f"BayesSearch: n_iter={n_search_iter}, cv={search_cv_folds}, n_jobs=-1")
     print(f"Outer Evaluation: Stratified {outer_cv_folds}-Fold CV, n_jobs=-1")
 
-    # --- Loop Through Feature Configurations ---
     for config_index, (config_name, embedding_type, feature_filter_marker, apply_smote_config) in enumerate(model_configs):
         print("\n" + "="*80 + f"\nProcessing Config {config_index + 1}/{len(model_configs)}: {config_name}")
         print(f"  Embedding: {embedding_type}, Filter: {feature_filter_marker}, SMOTE: {apply_smote_config}\n" + "="*80)
@@ -501,7 +519,6 @@ def main_classification():
         X_df_full = y_original_df = X_features = None; gc.collect(); original_feature_names = None
 
         try:
-            # 1. Extract Features
             print("  Step 1: Extracting features...")
             X_df_full, _ = extract_features(data, embedding_type=embedding_type)
             if X_df_full is None or X_df_full.empty or 'target_class' not in X_df_full.columns or X_df_full.shape[1] <= 1:
@@ -509,7 +526,6 @@ def main_classification():
             y_original_df = X_df_full.pop('target_class'); X_features = X_df_full
             print(f"  Features extracted (before filter): {X_features.shape}")
 
-            # Apply Feature Filter Marker
             if feature_filter_marker == "NO_EMBEDDINGS":
                 embedding_cols_to_drop = [col for col in X_features.columns if '_emb_' in col]
                 if embedding_cols_to_drop:
@@ -528,7 +544,7 @@ def main_classification():
                     print("  Warning: No embedding columns found to keep. Skipping this config.")
                     continue
             elif feature_filter_marker == "PRE_LAUNCH_ONLY":
-                non_pre_launch_features = ['commentsCount', 'updateCount'] #'projectFAQsCount', 'rewardscount', 
+                non_pre_launch_features = ['commentsCount', 'updateCount']
                 features_to_drop = [col for col in X_features.columns if col in non_pre_launch_features]
                 if features_to_drop:
                     print(f"  Applying 'PRE_LAUNCH_ONLY' filter: Dropping {len(features_to_drop)} non-pre-launch columns: {features_to_drop}")
@@ -537,7 +553,6 @@ def main_classification():
                 else:
                     print("  'PRE_LAUNCH_ONLY' filter: No non-pre-launch columns found to drop.")
 
-            # Save Feature List
             original_feature_names = X_features.columns.tolist()
             feature_list_filename = os.path.join(output_dir, f"{config_name}_feature_list.txt")
             try:
@@ -545,7 +560,6 @@ def main_classification():
                     for feature_name in original_feature_names: f_feat.write(f"{feature_name}\n")
                 print(f"  Saved final feature list ({len(original_feature_names)} features) to: {feature_list_filename}")
                 
-                # DummyClassifier baseline
                 if not X_features.empty and original_feature_names:
                     print("Running DummyClassifier baseline...")
                     dummy = DummyClassifier(strategy='most_frequent', random_state=42)
@@ -553,6 +567,12 @@ def main_classification():
                     dummy_f1_mean = dummy_scores.mean()
                     dummy_f1_std = dummy_scores.std()
                     print(f"DummyClassifier F1 Weighted (mean ± std): {dummy_f1_mean:.4f} ± {dummy_f1_std:.4f}")
+                    
+                    # Get dummy predictions for counting
+                    dummy_predictions = cross_val_predict(dummy, X_features, y_original_df, cv=cv_strategy_outer, n_jobs=-1)
+                    dummy_pred_successful = np.sum(dummy_predictions == 1)
+                    dummy_pred_failed = np.sum(dummy_predictions == 0)
+                    
                     all_results.append({
                         'Model Config': f"{config_name}_Dummy",
                         'Classifier': 'DummyClassifier',
@@ -564,13 +584,14 @@ def main_classification():
                         'AUC': np.nan,
                         'Mean Fit Time': np.nan,
                         'WEIGHT K': 'N/A',
+                        'Predicted Successful': dummy_pred_successful,
+                        'Predicted Failed': dummy_pred_failed,
                         'Best Params': 'strategy=most_frequent',
                         'Optimization Status': 'Baseline'
                     })
                 else:
                     print("Skipping DummyClassifier: No features available")
 
-                # Feature correlations with target_class
                 if not X_features.empty and original_feature_names:
                     print("Calculating feature correlations with target_class...")
                     correlations = X_features.join(y_original_df).corr(numeric_only=True)['target_class'].abs().sort_values(ascending=False)
@@ -595,7 +616,6 @@ def main_classification():
         if X_features.empty or not original_feature_names:
             print(f"  Skipping '{config_name}': No features."); continue
 
-        # 2. Base Preprocessing
         X_processed_base, y_original_array, processed_feature_names = None, None, None
         try:
             print("  Step 2: Base preprocessing...")
@@ -622,7 +642,6 @@ def main_classification():
         finally:
             del X_features, y_original_df; gc.collect()
 
-        # --- Loop Through Classifiers ---
         models_to_run_this_config = list(classifiers.keys())
         for model_key in models_to_run_this_config:
             full_model_name = f"{config_name}_{model_key}"
@@ -714,6 +733,15 @@ def main_classification():
                         print("  Cleaning NaN/Inf before CV.")
                         eval_X = np.nan_to_num(eval_X, nan=0.0, posinf=np.finfo(np.float64).max, neginf=np.finfo(np.float64).min)
                     cv_results = cross_validate(best_model, eval_X, eval_y, cv=cv_strategy_outer, scoring=scoring_metrics, return_train_score=False, n_jobs=6, error_score='raise')
+                    
+                    # Get cross-validation predictions for counting
+                    print(f"  Getting cross-validation predictions for counting...")
+                    cv_predictions = cross_val_predict(best_model, eval_X, eval_y, cv=cv_strategy_outer, n_jobs=6)
+                    pred_successful = np.sum(cv_predictions == 1)
+                    pred_failed = np.sum(cv_predictions == 0)
+                    
+                    print(f"  Prediction counts: Successful={pred_successful}, Failed={pred_failed}")
+                    
                     result_entry = {
                         'Model Config': config_name,
                         'Classifier': model_key,
@@ -725,6 +753,8 @@ def main_classification():
                         'AUC': np.mean(cv_results['test_roc_auc']),
                         'Mean Fit Time': np.mean(cv_results['fit_time']),
                         'WEIGHT K': smote_k_used,
+                        'Predicted Successful': pred_successful,
+                        'Predicted Failed': pred_failed,
                         'Best Params': best_params,
                         'Optimization Status': optimization_status
                     }
@@ -734,9 +764,10 @@ def main_classification():
                         print(f"    Mean test_{metric}: {np.mean(cv_results[f'test_{metric}']):.4f}")
                     print(f"    Mean Fit Time: {result_entry['Mean Fit Time']:.2f}s")
                     print(f"    WEIGHT K Used: {smote_k_used}")
+                    print(f"    Predicted Successful: {pred_successful}")
+                    print(f"    Predicted Failed: {pred_failed}")
                     print(f"  --- End CV Results ---")
 
-                    # SHAP Analysis for Traditional Features Only
                     if config_name == "Traditional_Features_Only_Weight_FIX" and model_key in ['XGBoost', 'RandomForest']:
                         print(f"\n🔍 Running SHAP analysis for {config_name} + {model_key}...")
                         import shap
@@ -779,7 +810,6 @@ def main_classification():
                         shap_values = explainer(eval_X)
                         shap_df = pd.DataFrame(shap_values.values, columns=original_feature_names)
                         
-                        # Split into positive vs. negative mean influence
                         mean_shap = shap_df.mean().sort_values(ascending=False)
                         pos_influence = mean_shap[mean_shap > 0].head(20)
                         neg_influence = mean_shap[mean_shap < 0].tail(20)
@@ -787,7 +817,6 @@ def main_classification():
                         print("\nTop 20 Features with Positive Influence:\n", pos_influence)
                         print("\nTop 20 Features with Negative Influence:\n", neg_influence)
 
-                        # Save optional CSV
                         pos_influence.to_csv(os.path.join(output_dir, f"{config_name}_positive_influence.csv"))
                         neg_influence.to_csv(os.path.join(output_dir, f"{config_name}_negative_influence.csv"))
                         print(f"Positive influence features saved to {os.path.join(output_dir, f'{config_name}_positive_influence.csv')}")                   
@@ -804,11 +833,12 @@ def main_classification():
                         'AUC': np.nan,
                         'Mean Fit Time': np.nan,
                         'WEIGHT K': smote_k_used,
+                        'Predicted Successful': np.nan,
+                        'Predicted Failed': np.nan,
                         'Best Params': best_params,
                         'Optimization Status': optimization_status
                     })
 
-                # 5. Feature Importance
                 if best_model is not None:
                     try:
                         fit_on_base_data = X_processed_base.copy()
@@ -850,6 +880,8 @@ def main_classification():
                     'AUC': np.nan,
                     'Mean Fit Time': np.nan,
                     'WEIGHT K': smote_k_used,
+                    'Predicted Successful': np.nan,
+                    'Predicted Failed': np.nan,
                     'Best Params': {'error': f"Outer loop: {model_e}"},
                     'Optimization Status': optimization_status
                 })
@@ -866,9 +898,9 @@ def main_classification():
         end_time_config = time.time()
         print(f"\nTotal time for config '{config_name}': {end_time_config - start_time_config:.2f} seconds")
 
-    # --- Post-Processing and Final Output ---
     print("\n" + "="*80 + "\nOverall Analysis Summary & Output Generation\n" + "="*80)
     if not all_results: print("No models processed successfully."); return
+    
     print("\nChecking model performance against DummyClassifier baseline...")
     dummy_results = [r for r in all_results if r['Classifier'] == 'DummyClassifier']
     model_results = [r for r in all_results if r['Classifier'] != 'DummyClassifier']
@@ -880,12 +912,40 @@ def main_classification():
                 model_f1 = model['F1 Weighted']
                 if model_f1 - dummy_f1 < 0.1:
                     print(f"WARNING: {model['Model Config']} ({model['Classifier']}) F1 Weighted ({model_f1:.4f}) is close to DummyClassifier ({dummy_f1:.4f})")
+    
+    # Print prediction counts summary
+    print("\n" + "="*60)
+    print("PREDICTION COUNTS SUMMARY")
+    print("="*60)
+    for result in all_results:
+        if pd.notna(result.get('Predicted Successful')) and pd.notna(result.get('Predicted Failed')):
+            model_name = f"{result['Model Config']} | {result['Classifier']}"
+            pred_success = int(result['Predicted Successful'])
+            pred_failed = int(result['Predicted Failed'])
+            total_pred = pred_success + pred_failed
+            success_rate = (pred_success / total_pred * 100) if total_pred > 0 else 0
+            f1_score = result.get('F1 Weighted', 'N/A')
+            if isinstance(f1_score, float):
+                f1_score = f"{f1_score:.4f}"
+            
+            print(f"{model_name}:")
+            print(f"  Predicted Successful: {pred_success:,}")
+            print(f"  Predicted Failed: {pred_failed:,}")
+            print(f"  Total Predictions: {total_pred:,}")
+            print(f"  Success Rate: {success_rate:.1f}%")
+            print(f"  F1 Weighted: {f1_score}")
+            print()
+    print("="*60)
+    
     results_df = pd.DataFrame(all_results)
     results_csv_path = os.path.join(output_dir, 'classification_model_results_summary.csv')
     formatted_output_path = os.path.join(output_dir, 'formatted_classification_results_summary.md')
-    try: results_df.round(5).to_csv(results_csv_path, index=False, encoding='utf-8'); print(f"\nRaw results saved: {results_csv_path}")
-    except Exception as e: print(f"Error saving raw results: {e}")
-    # --- Save formatted results per model config ---
+    try: 
+        results_df.round(5).to_csv(results_csv_path, index=False, encoding='utf-8')
+        print(f"\nRaw results saved: {results_csv_path}")
+    except Exception as e: 
+        print(f"Error saving raw results: {e}")
+    
     try:
         results_by_config = defaultdict(list)
         for res in all_results:
@@ -899,31 +959,44 @@ def main_classification():
             except Exception as e:
                 print(f"⚠️ Error writing per-model formatted output for {config_name}: {e}")
 
-    except Exception as e: print(f"Error generating formatted results: {e}"); traceback.print_exc()
-    try: plot_classification_results(results_df.copy(), output_dir)
-    except Exception as e: print(f"Error generating plots: {e}"); traceback.print_exc()
+    except Exception as e: 
+        print(f"Error generating formatted results: {e}")
+        traceback.print_exc()
+    
+    try: 
+        plot_classification_results(results_df.copy(), output_dir)
+    except Exception as e: 
+        print(f"Error generating plots: {e}")
+        traceback.print_exc()
+    
+    # Generate prediction counts visualization
+    try:
+        plot_prediction_counts(results_df.copy(), output_dir)
+    except Exception as e:
+        print(f"Error generating prediction counts plots: {e}")
+        traceback.print_exc()
+    
     if feature_importance_dict:
         viz_importance_path = os.path.join(output_dir, 'visualizations', 'feature_importance_comparison_top25.png')
-        try: visualize_feature_importance(feature_importance_dict, top_n=25, save_path=viz_importance_path)
-        except Exception as e: print(f"Error generating importance plot: {e}"); traceback.print_exc()
-    else: print("\nNo feature importance data generated.")
+        try: 
+            visualize_feature_importance(feature_importance_dict, top_n=25, save_path=viz_importance_path)
+        except Exception as e: 
+            print(f"Error generating importance plot: {e}")
+            traceback.print_exc()
+    else: 
+        print("\nNo feature importance data generated.")
+    
     print(f"\nClassification analysis complete! Results in: {os.path.abspath(output_dir)}")
-
-# ==============================================================================
-#                   SCRIPT EXECUTION ENTRY POINT
-# ==============================================================================
 
 if __name__ == "__main__":
     script_start_time = time.time()
 
-    # --- Define Global Config Variables ---
-    n_search_iter = 20      # Iterations for BayesSearchCV  # עודכן מ-RandomizedSearchCV
-    search_cv_folds = 3     # Folds within RandomizedSearchCV
-    outer_cv_folds = 5      # Folds for final evaluation
+    n_search_iter = 5
+    search_cv_folds = 5
+    outer_cv_folds = 5
 
-    # Declare globals potentially used by reporting funcs outside main
-    output_dir = "classification_results_final_compare" # Default, updated in main
-    model_configs = [] # Populated in main
+    output_dir = "classification_results_final_compare"
+    model_configs = []
 
     print("+"*30 + " Starting FINAL Classification Analysis Script " + "+"*30)
     print("Comparing Feature Sets:")
@@ -937,17 +1010,24 @@ if __name__ == "__main__":
     print(f"Using BayesSearchCV (n_iter={n_search_iter}, cv={search_cv_folds}, n_jobs=-1).")
     print(f"Using Stratified {outer_cv_folds}-Fold CV (n_jobs=-1) for final evaluation.")
     print("*** Ensure libraries installed: pip install pandas numpy matplotlib seaborn scikit-learn imbalanced-learn xgboost catboost ***")
+    print("\n🔍 NEW: Tracking prediction counts - how many projects each model predicts as successful vs failed!")
 
-    # --- Run Main Analysis ---
-    try: main_classification()
-    except NameError as ne: print(f"\n--- CRITICAL NameError: {ne} ---"); print("Check library imports (xgboost, catboost?)."); traceback.print_exc()
-    except Exception as main_e: print(f"\n--- CRITICAL ERROR IN MAIN: {type(main_e).__name__}: {main_e} ---"); traceback.print_exc()
-    finally: print("\nPerforming final garbage collection..."); gc.collect()
+    try: 
+        main_classification()
+    except NameError as ne: 
+        print(f"\n--- CRITICAL NameError: {ne} ---")
+        print("Check library imports (xgboost, catboost?).")
+        traceback.print_exc()
+    except Exception as main_e: 
+        print(f"\n--- CRITICAL ERROR IN MAIN: {type(main_e).__name__}: {main_e} ---")
+        traceback.print_exc()
+    finally: 
+        print("\nPerforming final garbage collection...")
+        gc.collect()
 
-    script_end_time = time.time(); total_time = script_end_time - script_start_time
+    script_end_time = time.time()
+    total_time = script_end_time - script_start_time
     print("\n" + "+" * 30 + " Script Execution Finished " + "+" * 30)
     print(f"Total script execution time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
     print(f"Results saved in: {os.path.abspath(output_dir)}")
     print("\nEnd of script.")
-    # בסוף main_classification, לפני הפקת התוצאות
-    print("\nChecking model performance against DummyClassifier baseline...")
