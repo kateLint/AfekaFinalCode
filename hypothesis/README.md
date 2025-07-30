@@ -136,4 +136,3 @@ And for `h5.py`, ensure the spaCy English model is installed:
 ```bash
 python -m spacy download en_core_web_sm
 ```
-```
