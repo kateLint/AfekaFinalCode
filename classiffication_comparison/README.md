@@ -4,7 +4,7 @@ This project trains and evaluates multiple machine learning models (XGBoost, Ran
 
 ## Features
 
-- Supports multiple classifiers (XGBoost, RandomForest)
+- Supports multiple classifiers (XGBoost, RandomForest, LightGBM, CatBoost)
 - Automated hyperparameter tuning with BayesSearchCV
 - SHAP value analysis and feature importance plots
 - Model evaluation: classification report, ROC curves, confusion matrix
@@ -28,7 +28,3 @@ Make sure to update the dataset path and any config parameters at the top of the
 - Classification metrics
 - SHAP plots
 - Visual comparison charts
-
-## Author
-
-Generated with help from ChatGPT.
