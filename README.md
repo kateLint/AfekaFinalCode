@@ -37,6 +37,3 @@ This repository analyzes how textual and structural features of Kickstarter proj
 - Python (various packages: pandas, numpy, sklearn, lightgbm, xgboost, catboost, transformers, bertopic, SHAP, etc.)
 - See individual script headers and `requirements.txt` for details.
 
----
-
-*This summary covers only a portion of the files. For the complete file list, browse the repository here: [AfekaFinalCode on GitHub](https://github.com/kateLint/AfekaFinalCode).*
