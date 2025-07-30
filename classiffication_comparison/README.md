@@ -1,34 +1,113 @@
-# AutoML Classifier Comparison with SHAP
+# Kickstarter Project Success Classifier 🎯
 
-This project trains and evaluates multiple machine learning models (XGBoost, RandomForest) using Bayesian optimization and SHAP for interpretability. It supports model comparison with metrics like F1-score, precision, recall, and AUC.
+This repository contains a full-featured machine learning pipeline for predicting the success of Kickstarter technology projects. Built for research-grade analysis, it combines traditional structured features, transformer-based embeddings, Bayesian optimization, and SHAP explainability into a single powerful framework.
 
-## Features
+---
 
-- Supports multiple classifiers (XGBoost, RandomForest)
-- Automated hyperparameter tuning with BayesSearchCV
-- SHAP value analysis and feature importance plots
-- Model evaluation: classification report, ROC curves, confusion matrix
-- Easy customization for additional models
+## ✨ Highlights
 
-## Requirements
+- **Multi-model comparison**: RandomForest, XGBoost, LightGBM, CatBoost
+- **Advanced features**: Readability metrics, sentiment scores, GCI, and transformer embeddings (MiniLM, RoBERTa, ModernBERT)
+- **Bayesian Optimization**: Efficient hyperparameter tuning using `BayesSearchCV`
+- **Explainability**: SHAP summary and force plots per model
+- **Visualization**: Prediction count comparisons, feature importance, success rate per model
+- **Robust Evaluation**: Stratified k-fold CV with detailed metrics and result export
 
-See `requirements.txt`.
+---
 
-## How to Run
+## 🚀 How to Run
+
+1. Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+2. Place your Kickstarter dataset (`.json`) in the correct path.
+    > Example path used: `/Users/kerenlint/Projects/Afeka/models/all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json`
+
+3. Run the pipeline:
+    ```bash
+    python xgboost_rf_automl_with_shap.py
+    ```
+
+---
+
+## 📂 Outputs
+
+All results are saved under:
 
 ```bash
-python xgboost_rf_automl_with_shap.py
+classification_results_weighted_compare_final/
 ```
 
-Make sure to update the dataset path and any config parameters at the top of the script.
+Includes:
 
-## Output
+- CSVs with metrics, correlations, feature importance
+- SHAP visualizations (summary + force plots)
+- Markdown result tables per model configuration
+- Aggregated prediction count visualizations
 
-- Trained models
-- Classification metrics
-- SHAP plots
-- Visual comparison charts
+---
 
-## Author
+## 🧠 Feature Configurations
 
-Generated with help from ChatGPT.
+Each run evaluates several combinations of:
+
+- Feature types:
+    - Traditional
+    - MiniLM / RoBERTa / ModernBERT embeddings
+    - Embeddings only / All / Without embeddings
+- Classifiers:
+    - RandomForest
+    - XGBoost
+    - LightGBM
+    - CatBoost
+
+---
+
+## 🧪 SHAP & Explainability
+
+Models with SHAP enabled will generate:
+
+- Summary plot of global feature importance
+- Force plot for sample prediction
+- CSV with SHAP values
+- Top 20 features with positive/negative impact
+
+---
+
+## 📊 Performance Metrics
+
+Tracked metrics include:
+
+- F1 (weighted)
+- Recall / Precision
+- AUC (ROC)
+- Specificity
+- Prediction counts (successful vs failed)
+- Fit time
+
+---
+
+## 👩‍🔬 Research Context
+
+This project is part of a Master's thesis:
+
+> **Title**: *Crowdfunding Technology Projects: The Impact of Textual Characterization on Project Success*  
+> **Author**: Keren Lint  
+> **Institution**: Afeka College of Engineering, 2025
+
+---
+
+## ⚠️ Notes
+
+- Only structured and preprocessed JSON files are supported.
+- Excludes known leakage features (e.g., pledged amount, backers).
+- Default config: 5-fold outer CV, 5-fold tuning, 5 BayesSearch iterations.
+
+---
+
+## 📜 License
+
+This codebase is for academic/research purposes.  
+Contact the author for reuse, citation, or collaboration.
