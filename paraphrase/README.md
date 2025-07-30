@@ -86,18 +86,6 @@ Uses Optuna to find best decoder parameters:
 
 All trials filtered by coherence threshold (default: 0.6).
 
----
-
-## 🛠 Future Improvements
-
-- [ ] Save best paraphrases to CSV
-- [ ] Add Gradio interface
-- [ ] Extend to pledged ratio prediction
-- [ ] Add support for Hebrew translation/analysis
-
-
----
-
 ## 🔢 Example Input and Output
 
 ### 📝 Input (Python dictionary format)
