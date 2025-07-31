@@ -10,6 +10,8 @@ from sklearn.dummy import DummyClassifier
 from sklearn.model_selection import cross_val_score, cross_val_predict
 from sklearn.decomposition import PCA
 from collections import defaultdict
+from sklearn.linear_model import LogisticRegression
+
 
 from sklearn.model_selection import (
     train_test_split,
@@ -80,7 +82,12 @@ def get_bayes_search_space(model_key):
             'classifier__subsample': Real(0.6, 1.0),
             'classifier__border_count': Integer(32, 128)
         }
-
+    elif model_key == 'LogisticRegression':
+        return {
+            'classifier__C': Real(1e-4, 10, prior='log-uniform'),
+            'classifier__penalty': Categorical(['l1', 'l2']),
+            'classifier__solver': Categorical(['liblinear'])  # use saga if you want to support both l1 and l2
+        }
     return {}
 
 def safe_float(value, default=np.nan):
@@ -502,7 +509,9 @@ def main_classification():
         'RandomForest': RandomForestClassifier(random_state=42, n_jobs=-1),
         'LightGBM': lgb.LGBMClassifier(random_state=42, verbose=-1, n_jobs=-1),
         'XGBoost': XGBClassifier(random_state=42, objective='binary:logistic', eval_metric='logloss', use_label_encoder=False, verbosity=0, n_jobs=-1),
-        'CatBoost': CatBoostClassifier(random_state=42, verbose=0)
+        'CatBoost': CatBoostClassifier(random_state=42, verbose=0),
+        'LogisticRegression': LogisticRegression(solver='liblinear', random_state=42)
+
 
     }
     print(f"\nClassifiers to compare: {list(classifiers.keys())}")
@@ -675,7 +684,9 @@ def main_classification():
                         weights = [total / counter[0], total / counter[1]]
                         classifier_instance.set_params(class_weights=weights)
                         print(f"    -> Using class_weights={weights} for CatBoost")
-
+                    elif model_key == 'LogisticRegression':
+                        classifier_instance.set_params(class_weight='balanced')
+                        print("    -> Using class_weight='balanced' for LogisticRegression")
                     pipeline_steps.append(('classifier', classifier_instance))
                     pipeline_for_search = ImbPipeline(pipeline_steps)
                     search_space = get_bayes_search_space(model_key)
