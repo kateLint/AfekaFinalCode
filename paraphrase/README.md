@@ -1,16 +1,16 @@
-# 📘 Kickstarter Paraphrasing Optimizer
+# 📘 Kickstarter Paraphrasing Optimizer (RoBERTa Version)
 
-A research-grade tool that uses **paraphrasing, embeddings, and machine learning** to improve Kickstarter campaign success through better narrative phrasing.
+A research-grade tool that uses **paraphrasing, RoBERTa embeddings, and machine learning** to improve Kickstarter campaign success through better narrative phrasing.
 
 ---
 
 ## 🚀 Features
 
-- ⚙️ **Paraphrase Generation** with `humarin/chatgpt_paraphraser_on_T5_base`
-- 📊 **Success Evaluation** using a pretrained LightGBM classifier
-- 📎 **Keyphrase Extraction** via KeyBERT
-- 🧠 **Coherence Scoring** using MiniLM embeddings
-- 🔍 **Bayesian Hyperparameter Optimization** with Optuna
+- ⚙️ **Paraphrase Generation** with [`humarin/chatgpt_paraphraser_on_T5_base`](https://huggingface.co/humarin/chatgpt_paraphraser_on_T5_base)
+- 📊 **Success Evaluation** using a pretrained **XGBoost classifier**
+- 📎 **Keyphrase Extraction** via [KeyBERT](https://github.com/MaartenGr/KeyBERT)
+- 🧠 **Coherence Scoring** using **RoBERTa embeddings**
+- 🔍 **Bayesian Hyperparameter Optimization** with [Optuna](https://optuna.org/)
 - ⚡ **Quick Suggestions** using preset decoding strategies
 - 📉 **Visual Success Bars** for user-friendly feedback
 
@@ -23,11 +23,12 @@ A research-grade tool that uses **paraphrasing, embeddings, and machine learning
 git clone <your-repo-url>
 cd kickstarter-paraphraser
 pip install -r requirements.txt
+python -m nltk.downloader punkt
 ```
 
 ### 2. Run the main script:
 ```bash
-python paraphrasing_optimizer.py
+python paraphrasa_roberta.py
 ```
 
 ---
@@ -36,9 +37,9 @@ python paraphrasing_optimizer.py
 
 ```text
 .
-├── paraphrasing_optimizer.py     # Main script
-├── lightgbm_kickstarter_success_model.pkl
-├── lightgbm_feature_columns.json
+├── paraphrasa_roberta.py                # Main script
+├── xgboost_kickstarter_success_model.pkl # Trained classifier model
+├── xgboost_feature_columns.json          # Feature list
 ├── requirements.txt
 ├── README.md
 └── (optional) new_projects.json
@@ -51,7 +52,13 @@ python paraphrasing_optimizer.py
 A dictionary-style project input with at least:
 - `story`: the main narrative
 - `risks`: the risk section
-- Structured features: `goal`, `rewardscount`, `category_Web_Development`, etc.
+- Structured features:
+  - `goal`
+  - `rewardscount`
+  - `projectFAQsCount`
+  - `project_length_days`
+  - `preparation_days`
+  - category flags (e.g., `category_Web_Development`)
 
 ---
 
@@ -62,29 +69,30 @@ A dictionary-style project input with at least:
   - Score bars
   - Top paraphrases
   - Optimization reports
-- Optional: Save results to CSV (planned)
 
 ---
 
 ## 📚 Models Used
 
-| Model                                 | Purpose                       |
-|--------------------------------------|-------------------------------|
-| `humarin/chatgpt_paraphraser_on_T5_base` | Paraphrase generation         |
-| `sentence-transformers/all-MiniLM-L12-v2` | Embeddings + Coherence Check |
-| LightGBM classifier                  | Success prediction           |
-| KeyBERT                              | Keyphrase extraction         |
+| Model                                                 | Purpose                       |
+|------------------------------------------------------|-------------------------------|
+| `humarin/chatgpt_paraphraser_on_T5_base`             | Paraphrase generation         |
+| `sentence-transformers/roberta-base-nli-mean-tokens` | Embeddings + Coherence Check |
+| XGBoost classifier                                   | Success prediction           |
+| KeyBERT                                              | Keyphrase extraction         |
 
 ---
 
 ## ⚙️ Optimization
 
 Uses Optuna to find best decoder parameters:
-- `top_k`: token diversity
-- `top_p`: nucleus sampling
-- `temperature`: randomness
+- `top_k`: token diversity (20–150)
+- `top_p`: nucleus sampling (0.85–0.98)
+- `temperature`: randomness (0.8–1.5)
 
-All trials filtered by coherence threshold (default: 0.6).
+All trials filtered by coherence threshold (default: `0.60`).
+
+---
 
 ## 🔢 Example Input and Output
 
@@ -106,9 +114,9 @@ project_input = {
 ### ✅ Output (Console Example)
 
 ```text
-🎯 Original STORY:
-✅ Success Probability: 42.35%
-📈 Visual Score: 🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜
+🎯 ORIGINAL STORY:
+✅ Success Probability (combined): 42.35%
+📈 Visual Score: 🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (42.35%)
 
 ⚡ Fast Paraphrase Suggestions:
 🔹 Suggestion #1
@@ -117,7 +125,6 @@ project_input = {
 🧠 Coherence Score: 0.74 ✅ Strong
 📜 Paraphrased Text: This groundbreaking device is designed to redefine how we interact with modern gadgets...
 ```
-
 
 ---
 
@@ -129,7 +136,8 @@ MIT License. For academic or research use, please cite appropriately.
 
 ## ✨ Acknowledgments
 
-- Hugging Face Transformers
-- Sentence-Transformers
-- Optuna team
+- [Hugging Face Transformers](https://huggingface.co/transformers/)
+- [Sentence-Transformers](https://www.sbert.net/)
+- [Optuna](https://optuna.org/)
+- [KeyBERT](https://github.com/MaartenGr/KeyBERT)
 - Kickstarter for the dataset

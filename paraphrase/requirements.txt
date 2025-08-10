@@ -1,10 +1,11 @@
-pandas
 numpy
+pandas
+joblib
+nltk
 torch
-transformers>=4.25.1
+transformers
 sentence-transformers
 scikit-learn
-joblib
 optuna
-nltk
 keybert
+psutil
