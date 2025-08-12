@@ -159,7 +159,8 @@ def cross_validate_model_with_skf(model, X, y, skf_splitter_obj):
 
 def generate_enhanced_shap_analysis(model, X_train, X_test, y_train, model_name, output_dir, random_state_seed=SEED):
     try:
-        embedding_patterns = ['Story_emb_', 'Risks_emb_', 'StorySVD_', 'RisksSVD_']
+        embedding_patterns = ['Story_minilm_emb_', 'Risks_minilm_emb_', 'Story_roberta_emb_', 'Risks_roberta_emb_', 
+                             'Story_modernbert_emb_', 'Risks_modernbert_emb_', 'StorySVD_', 'RisksSVD_']
         pure_feature_cols = [col for col in X_test.columns 
                            if not any(col.startswith(pattern) for pattern in embedding_patterns)]
         
@@ -388,7 +389,9 @@ class DataPreprocessor:
         self._last_fit_X_index = X_train_df.index
 
         self.numerical_cols_to_impute = [col for col in X_train.select_dtypes(include=np.number).columns
-                                       if not (col.startswith('Story_emb_') or col.startswith('Risks_emb_') or
+                                       if not (col.startswith('Story_minilm_emb_') or col.startswith('Risks_minilm_emb_') or
+                                               col.startswith('Story_roberta_emb_') or col.startswith('Risks_roberta_emb_') or
+                                               col.startswith('Story_modernbert_emb_') or col.startswith('Risks_modernbert_emb_') or
                                                col.startswith('StorySVD_') or col.startswith('RisksSVD_'))]
         valid_numerical_cols = [col for col in self.numerical_cols_to_impute if not X_train[col].isna().all()]
         if len(valid_numerical_cols) < len(self.numerical_cols_to_impute):
@@ -400,7 +403,10 @@ class DataPreprocessor:
             X_train[self.numerical_cols_to_impute] = self.imputer.fit_transform(X_train[self.numerical_cols_to_impute])
 
         self.non_emb_cols_to_scale = [c for c in X_train.select_dtypes(include=np.number).columns
-                                     if not any(c.startswith(p) for p in ['Story_emb_', 'Risks_emb_', 'StorySVD_', 'RisksSVD_'])]
+                                     if not any(c.startswith(p) for p in ['Story_minilm_emb_', 'Risks_minilm_emb_', 
+                                                                        'Story_roberta_emb_', 'Risks_roberta_emb_',
+                                                                        'Story_modernbert_emb_', 'Risks_modernbert_emb_',
+                                                                        'StorySVD_', 'RisksSVD_'])]
         if self.non_emb_cols_to_scale:
             self.scaler_non_emb = RobustScaler()
             X_train[self.non_emb_cols_to_scale] = self.scaler_non_emb.fit_transform(X_train[self.non_emb_cols_to_scale])
@@ -465,44 +471,130 @@ class DataPreprocessor:
         self.fit(X_train_df, y_train_series)
         return self.transform(X_train_df)
 
-def extract_features(data):
+def extract_features(data, embedding_type='minilm'):
+    """
+    Extract features from raw data with support for different embedding types.
+    
+    Args:
+        data: Raw JSON data
+        embedding_type: 'minilm' or 'roberta' for different embedding types
+    
+    Returns:
+        DataFrame with all features and embeddings
+    """
     features, story_embeddings, risks_embeddings, error_count, skipped_count = [], [], [], 0, 0
-    for item in tqdm(data, desc="Extracting Features"):
+    
+    # Define embedding keys for different types
+    embedding_keys = {
+        'minilm': ('story_minilm_embedding', 'risk_minilm_embedding'),
+        'roberta': ('story_roberta_embedding', 'risk_roberta_embedding'),
+        'modernbert': ('story_modernbert_embedding', 'risk_modernbert_embedding')
+    }
+    
+    story_key, risks_key = embedding_keys.get(embedding_type.lower(), embedding_keys['minilm'])
+    
+    for item in tqdm(data, desc=f"Extracting Features ({embedding_type})"):
         if item.get('state') not in ['successful', 'failed']:
             skipped_count += 1
             continue
+        
         ratio = safe_float(item.get('pledged_to_goal_ratio'))
         if pd.isna(ratio) or ratio <= 0:
             skipped_count += 1
             continue
+        
         try:
+            # Extract all features from classification script
             f = {
-                'pledged_to_goal_ratio': ratio, 'goal': safe_float(item.get('goal'), 0.0),
+                'pledged_to_goal_ratio': ratio,
+                'goal': safe_float(item.get('goal'), 0.0),
                 'projectFAQsCount': safe_float(item.get('projectFAQsCount'), 0.0),
+                'commentsCount': safe_float(item.get('commentsCount'), 0.0),
+                'updateCount': safe_float(item.get('updateCount'), 0.0),
                 'rewardscount': safe_float(item.get('rewardscount'), 0.0),
                 'project_length_days': safe_float(item.get('project_length_days')),
                 'preparation_days': safe_float(item.get('preparation_days')),
+                
+                # Story Analysis features
+                'Story_Avg_Sentence_Length': safe_float(item.get('Story Analysis', {}).get('Average Sentence Length')),
+                'Story_Flesch_Reading_Ease': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('Flesch Reading Ease')),
+                'Story_Flesch_Kincaid_Grade': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('Flesch-Kincaid Grade Level')),
+                'Story_Gunning_Fog': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('Gunning Fog Index')),
+                'Story_SMOG': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('SMOG Index')),
+                'Story_ARI': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('Automated Readability Index')),
+                
+                # Risks Analysis features
+                'Risks_Avg_Sentence_Length': safe_float(item.get('Risks and Challenges Analysis', {}).get('Average Sentence Length')),
+                'Risks_Flesch_Reading_Ease': safe_float(item.get('Risks and Challenges Analysis', {}).get('Readability Scores', {}).get('Flesch Reading Ease')),
+                'Risks_Flesch_Kincaid_Grade': safe_float(item.get('Risks and Challenges Analysis', {}).get('Readability Scores', {}).get('Flesch-Kincaid Grade Level')),
+                'Risks_Gunning_Fog': safe_float(item.get('Risks and Challenges Analysis', {}).get('Readability Scores', {}).get('Gunning Fog Index')),
+                'Risks_SMOG': safe_float(item.get('Risks and Challenges Analysis', {}).get('Readability Scores', {}).get('SMOG Index')),
+                'Risks_ARI': safe_float(item.get('Risks and Challenges Analysis', {}).get('Readability Scores', {}).get('Automated Readability Index')),
+                
+                # Sentiment features
+                'Story_Positive': safe_float(item.get('Story_Positive')),
+                'Story_Neutral': safe_float(item.get('Story_Neutral')),
+                'Story_Negative': safe_float(item.get('Story_Negative')),
                 'Story_Compound': safe_float(item.get('Story_Compound')),
+                'Risks_Positive': safe_float(item.get('Risks_Positive')),
+                'Risks_Neutral': safe_float(item.get('Risks_Neutral')),
+                'Risks_Negative': safe_float(item.get('Risks_Negative')),
                 'Risks_Compound': safe_float(item.get('Risks_Compound')),
-                'Story_Flesch_Reading_Ease': safe_float(item.get('Story Analysis', {}).get('Readability Scores', {}).get('Flesch Reading Ease'))
+                
+                # GCI features
+                'Story_GCI': safe_float(item.get('Story GCI')),
+                'Risks_GCI': safe_float(item.get('Risks and Challenges GCI'))
             }
+            
+            # Add category features
+            f["category_Web_Combined"] = 1 if item.get("category_Web", False) or item.get("category_Web Development", False) else 0
             for key, value in item.items():
-                if key.startswith('category_') and key not in f:
+                if key.startswith('category_') and key not in ['category_Technology', 'category_Web', 'category_Web Development']:
                     f[key] = 1 if value is True or str(value).lower() in ['true', '1'] else 0
+            
             features.append(f)
-            story_emb = item.get('story_miniLM', [])
-            risks_emb = item.get('risks_miniLM', [])
-            story_embeddings.append(story_emb if isinstance(story_emb, list) and len(story_emb) > 0 else [0.0] * 384)
-            risks_embeddings.append(risks_emb if isinstance(risks_emb, list) and len(risks_emb) > 0 else [0.0] * 384)
+            
+            # Extract embeddings
+            story_emb = item.get(story_key, [])
+            risks_emb = item.get(risks_key, [])
+            
+            # Handle embeddings with proper error checking
+            def process_embeddings(embeddings, default_dim=384):
+                if isinstance(embeddings, list) and len(embeddings) > 0:
+                    processed = []
+                    for x in embeddings:
+                        try:
+                            val = float(x) if x is not None else 0.0
+                            processed.append(0.0 if not np.isfinite(val) else val)
+                        except (ValueError, TypeError):
+                            processed.append(0.0)
+                    
+                    # Pad or truncate to consistent dimension
+                    if len(processed) < default_dim:
+                        processed.extend([0.0] * (default_dim - len(processed)))
+                    elif len(processed) > default_dim:
+                        processed = processed[:default_dim]
+                    
+                    return processed
+                return [0.0] * default_dim
+            
+            story_embeddings.append(process_embeddings(story_emb))
+            risks_embeddings.append(process_embeddings(risks_emb))
+            
         except Exception as e:
             error_count += 1
             print(f"Error extracting item: {e}")
+    
     print(f"Extracted {len(features)} features, skipped {skipped_count}, errors {error_count}")
     if not features:
         return pd.DataFrame()
+    
     df = pd.DataFrame(features)
-    story_df = pd.DataFrame(story_embeddings, columns=[f"Story_emb_{i}" for i in range(384)], index=df.index)
-    risks_df = pd.DataFrame(risks_embeddings, columns=[f"Risks_emb_{i}" for i in range(384)], index=df.index)
+    
+    # Create embedding DataFrames
+    story_df = pd.DataFrame(story_embeddings, columns=[f"Story_{embedding_type}_emb_{i}" for i in range(len(story_embeddings[0]))], index=df.index)
+    risks_df = pd.DataFrame(risks_embeddings, columns=[f"Risks_{embedding_type}_emb_{i}" for i in range(len(risks_embeddings[0]))], index=df.index)
+    
     return pd.concat([df, story_df, risks_df], axis=1)
 
 def train_model(X_train, y_train, X_test, y_test, model_instance, search_space,
@@ -612,7 +704,8 @@ def analyze_target_variable(y_raw):
     return y
 
 def analyze_correlations_pure_features_only(X_raw, y_log):
-    embedding_patterns = ['Story_emb_', 'Risks_emb_', 'StorySVD_', 'RisksSVD_']
+    embedding_patterns = ['Story_minilm_emb_', 'Risks_minilm_emb_', 'Story_roberta_emb_', 'Risks_roberta_emb_',
+                         'Story_modernbert_emb_', 'Risks_modernbert_emb_', 'StorySVD_', 'RisksSVD_']
     pure_feature_cols = [col for col in X_raw.columns 
                         if not any(col.startswith(pattern) for pattern in embedding_patterns)]
     
@@ -799,26 +892,34 @@ def main(data_path):
         print(f"Fatal: Data loading failed: {e}")
         return
 
-    # Extract features from raw data
-    raw_df = extract_features(data)
-    X_raw = raw_df.drop(columns=['pledged_to_goal_ratio'])
-    y_raw = raw_df['pledged_to_goal_ratio']
+    # Extract features from raw data with MiniLM embeddings
+    print("Extracting features with MiniLM embeddings...")
+    raw_df_minilm = extract_features(data, embedding_type='minilm')
+    X_raw_minilm = raw_df_minilm.drop(columns=['pledged_to_goal_ratio'])
+    y_raw_minilm = raw_df_minilm['pledged_to_goal_ratio']
+    
+    # Extract features from raw data with RoBERTa embeddings
+    print("Extracting features with RoBERTa embeddings...")
+    raw_df_roberta = extract_features(data, embedding_type='roberta')
+    X_raw_roberta = raw_df_roberta.drop(columns=['pledged_to_goal_ratio'])
+    y_raw_roberta = raw_df_roberta['pledged_to_goal_ratio']
 
-    # Analyze and visualize actual outcomes
-    band_counts_actual, percentages_actual = create_detailed_outcome_bands_visualization_real(y_raw, output_dir)
+    # Analyze and visualize actual outcomes (using MiniLM data as reference)
+    band_counts_actual, percentages_actual = create_detailed_outcome_bands_visualization_real(y_raw_minilm, output_dir)
 
     # Analyze target variable
-    y_raw = analyze_target_variable(y_raw)
-    y_processed, remove_mask = preprocess_target_variable_improved(y_raw, method='cap_and_log')
+    y_raw = analyze_target_variable(y_raw_minilm)
+    y_processed, remove_mask = preprocess_target_variable_improved(y_raw_minilm, method='cap_and_log')
 
     if remove_mask is not None:
-        X_raw = X_raw[remove_mask]
+        X_raw_minilm = X_raw_minilm[remove_mask]
+        X_raw_roberta = X_raw_roberta[remove_mask]
         y_processed = y_processed.reset_index(drop=True)
     y_log = y_processed
 
     # Analyze correlations and funding patterns
-    correlations_pure = analyze_correlations_pure_features_only(X_raw, y_log)
-    funding_categories, category_counts = analyze_funding_success_patterns(y_raw)
+    correlations_pure = analyze_correlations_pure_features_only(X_raw_minilm, y_log)
+    funding_categories, category_counts = analyze_funding_success_patterns(y_raw_minilm)
 
     print(f"\n=== PURE FEATURE INSIGHTS ===")
     print(f"Total pure features analyzed: {len(correlations_pure)}")
@@ -830,43 +931,73 @@ def main(data_path):
     successful_projects = sum(category_counts[cat] for cat in category_counts.index 
                             if 'Successfully Funded' in cat or 'Overfunded' in cat or 'Major Success' in cat)
     print(f"\n=== BUSINESS INSIGHTS ===")
-    print(f"Total successful projects (>80% funded): {successful_projects:,} ({successful_projects/len(y_raw)*100:.1f}%)")
-    print(f"Median funding ratio: {y_raw.median():.1%}")
-    print(f"Projects that exceeded goal: {sum(y_raw > 1.0):,} ({sum(y_raw > 1.0)/len(y_raw)*100:.1f}%)")
-    print(f"Data shape after cleaning: {raw_df.shape}")
+    print(f"Total successful projects (>80% funded): {successful_projects:,} ({successful_projects/len(y_raw_minilm)*100:.1f}%)")
+    print(f"Median funding ratio: {y_raw_minilm.median():.1%}")
+    print(f"Projects that exceeded goal: {sum(y_raw_minilm > 1.0):,} ({sum(y_raw_minilm > 1.0)/len(y_raw_minilm)*100:.1f}%)")
+    print(f"Data shape after cleaning: {raw_df_minilm.shape}")
     print(f"Target variable stats: min={y_log.min():.3f}, max={y_log.max():.3f}, std={y_log.std():.3f}")
-    print(f"Feature columns: {len(X_raw.columns)}")
+    print(f"Feature columns (MiniLM): {len(X_raw_minilm.columns)}")
+    print(f"Feature columns (RoBERTa): {len(X_raw_roberta.columns)}")
 
-    # Split data
+    # Split data for both embedding types
     y_bins_raw_split = make_stratified_bins(y_log, n_bins=5)
     stratify_raw = y_bins_raw_split if y_bins_raw_split is not None and y_bins_raw_split.nunique() > 1 else None
+    
     try:
-        X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(X_raw, y_log, test_size=0.2, random_state=SEED, stratify=stratify_raw)
+        X_train_minilm, X_test_minilm, y_train_minilm, y_test_minilm = train_test_split(
+            X_raw_minilm, y_log, test_size=0.2, random_state=SEED, stratify=stratify_raw)
+        X_train_roberta, X_test_roberta, y_train_roberta, y_test_roberta = train_test_split(
+            X_raw_roberta, y_log, test_size=0.2, random_state=SEED, stratify=stratify_raw)
     except ValueError:
-        X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(X_raw, y_log, test_size=0.2, random_state=SEED)
+        X_train_minilm, X_test_minilm, y_train_minilm, y_test_minilm = train_test_split(
+            X_raw_minilm, y_log, test_size=0.2, random_state=SEED)
+        X_train_roberta, X_test_roberta, y_train_roberta, y_test_roberta = train_test_split(
+            X_raw_roberta, y_log, test_size=0.2, random_state=SEED)
 
-    # Outlier check
-    X_train_no_o, y_train_no_o, outlier_mask = remove_outliers(X_train_r, y_train_r, threshold=3, remove=False)
-    print(f"Training data after outlier check: {len(X_train_no_o)} rows, {sum(~outlier_mask)} outliers flagged.")
-    if X_train_no_o.empty:
+    # Outlier check for MiniLM
+    X_train_minilm_no_o, y_train_minilm_no_o, outlier_mask_minilm = remove_outliers(
+        X_train_minilm, y_train_minilm, threshold=3, remove=False)
+    print(f"MiniLM training data after outlier check: {len(X_train_minilm_no_o)} rows, {sum(~outlier_mask_minilm)} outliers flagged.")
+    
+    # Outlier check for RoBERTa
+    X_train_roberta_no_o, y_train_roberta_no_o, outlier_mask_roberta = remove_outliers(
+        X_train_roberta, y_train_roberta, threshold=3, remove=False)
+    print(f"RoBERTa training data after outlier check: {len(X_train_roberta_no_o)} rows, {sum(~outlier_mask_roberta)} outliers flagged.")
+    
+    if X_train_minilm_no_o.empty or X_train_roberta_no_o.empty:
         print("Error: Training data empty after outlier check.")
         return
 
-    # Preprocess data
+    # Preprocess data for MiniLM
+    print("Preprocessing MiniLM data...")
     s_cols = []
     r_cols = []
-    preproc = DataPreprocessor(story_cols=s_cols, risks_cols=r_cols, output_dir=output_dir, random_state=SEED)
-    preproc.fit(X_train_no_o.copy(), y_train_no_o.copy())
-    X_train_p = preproc.transform(X_train_no_o.copy())
-    y_train_f = y_train_no_o.reset_index(drop=True)
-    X_train_p = X_train_p.reset_index(drop=True)
-    X_test_p = preproc.transform(X_test_r.copy())
-    y_test_f = y_test_r.reset_index(drop=True)
+    preproc_minilm = DataPreprocessor(story_cols=s_cols, risks_cols=r_cols, output_dir=output_dir, random_state=SEED)
+    preproc_minilm.fit(X_train_minilm_no_o.copy(), y_train_minilm_no_o.copy())
+    X_train_minilm_p = preproc_minilm.transform(X_train_minilm_no_o.copy())
+    y_train_minilm_f = y_train_minilm_no_o.reset_index(drop=True)
+    X_train_minilm_p = X_train_minilm_p.reset_index(drop=True)
+    X_test_minilm_p = preproc_minilm.transform(X_test_minilm.copy())
+    y_test_minilm_f = y_test_minilm.reset_index(drop=True)
+    
+    # Preprocess data for RoBERTa
+    print("Preprocessing RoBERTa data...")
+    preproc_roberta = DataPreprocessor(story_cols=s_cols, risks_cols=r_cols, output_dir=output_dir, random_state=SEED)
+    preproc_roberta.fit(X_train_roberta_no_o.copy(), y_train_roberta_no_o.copy())
+    X_train_roberta_p = preproc_roberta.transform(X_train_roberta_no_o.copy())
+    y_train_roberta_f = y_train_roberta_no_o.reset_index(drop=True)
+    X_train_roberta_p = X_train_roberta_p.reset_index(drop=True)
+    X_test_roberta_p = preproc_roberta.transform(X_test_roberta.copy())
+    y_test_roberta_f = y_test_roberta.reset_index(drop=True)
 
-    if len(X_train_p) != len(y_train_f) or len(X_test_p) != len(y_test_f):
-        print(f"Length Mismatch! Train X:{len(X_train_p)} y:{len(y_train_f)}. Test X:{len(X_test_p)} y:{len(y_test_f)}")
+    # Validation checks
+    if len(X_train_minilm_p) != len(y_train_minilm_f) or len(X_test_minilm_p) != len(y_test_minilm_f):
+        print(f"Length Mismatch! MiniLM Train X:{len(X_train_minilm_p)} y:{len(y_train_minilm_f)}. Test X:{len(X_test_minilm_p)} y:{len(y_test_minilm_f)}")
         return
-    if X_train_p.empty or X_test_p.empty:
+    if len(X_train_roberta_p) != len(y_train_roberta_f) or len(X_test_roberta_p) != len(y_test_roberta_f):
+        print(f"Length Mismatch! RoBERTa Train X:{len(X_train_roberta_p)} y:{len(y_train_roberta_f)}. Test X:{len(X_test_roberta_p)} y:{len(y_test_roberta_f)}")
+        return
+    if X_train_minilm_p.empty or X_test_minilm_p.empty or X_train_roberta_p.empty or X_test_roberta_p.empty:
         print("Error: Processed data is empty.")
         return
 
@@ -891,18 +1022,33 @@ def main(data_path):
         })
     }
     
-    # Train models
+    # Train models for both embedding types
     results = []
-    best_models = {}
+    best_models_minilm = {}
+    best_models_roberta = {}
     skf_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
     
-    print("Starting model training loop...")
-    for name, (model, space) in tqdm(models.items(), desc="Training Models", total=len(models)):
-        print(f"Training {name}...")
-        best_model, best_params, metrics = train_model(X_train_p, y_train_f, X_test_p, y_test_f, model, space, skf_cv, name, output_dir, SEED)
+    print("Starting model training loop for MiniLM embeddings...")
+    for name, (model, space) in tqdm(models.items(), desc="Training Models (MiniLM)", total=len(models)):
+        print(f"Training {name} with MiniLM embeddings...")
+        model_name = f"{name}_MiniLM"
+        best_model, best_params, metrics = train_model(
+            X_train_minilm_p, y_train_minilm_f, X_test_minilm_p, y_test_minilm_f, 
+            model, space, skf_cv, model_name, output_dir, SEED)
         if metrics:
             results.append(metrics)
-            best_models[name] = best_model
+            best_models_minilm[name] = best_model
+    
+    print("Starting model training loop for RoBERTa embeddings...")
+    for name, (model, space) in tqdm(models.items(), desc="Training Models (RoBERTa)", total=len(models)):
+        print(f"Training {name} with RoBERTa embeddings...")
+        model_name = f"{name}_RoBERTa"
+        best_model, best_params, metrics = train_model(
+            X_train_roberta_p, y_train_roberta_f, X_test_roberta_p, y_test_roberta_f, 
+            model, space, skf_cv, model_name, output_dir, SEED)
+        if metrics:
+            results.append(metrics)
+            best_models_roberta[name] = best_model
 
     if not results:
         print("No models trained.")
@@ -913,36 +1059,49 @@ def main(data_path):
     print(f"Top Models:\n{res_df[['model', 'R2', 'CV_R2', 'RMSE']].head()}")
     
     if not res_df.empty:
-        plt.figure(figsize=(10, 7))
+        plt.figure(figsize=(12, 8))
         sns.barplot(x='R2', y='model', data=res_df, palette='viridis', orient='h')
-        plt.title('R² Comparison')
+        plt.title('R² Comparison - MiniLM vs RoBERTa Embeddings')
         plt.xlabel('R² Score')
         plt.ylabel('Model')
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'r2_comparison.png'), dpi=300)
+        plt.savefig(os.path.join(output_dir, 'r2_comparison_minilm_vs_roberta.png'), dpi=300)
         plt.close()
 
-    # Generate predictions for full dataset
-    X_full_p = preproc.transform(X_raw.reset_index(drop=True))
-    print(f"Full dataset shape after preprocessing: {X_full_p.shape}")
+    # Generate predictions for full dataset with both embedding types
+    print("Generating predictions for full dataset...")
     
-    predictions_log = {}
-    predictions = {}
+    # MiniLM predictions
+    X_full_minilm_p = preproc_minilm.transform(X_raw_minilm.reset_index(drop=True))
+    print(f"Full MiniLM dataset shape after preprocessing: {X_full_minilm_p.shape}")
     
-    for model_name, model in best_models.items():
-        pred_log = model.predict(X_full_p)
-        predictions_log[model_name] = pred_log
-        predictions[model_name] = np.expm1(pred_log)
-        predictions[model_name] = np.where(np.isnan(predictions[model_name]), 0, predictions[model_name])
+    predictions_minilm = {}
+    for model_name, model in best_models_minilm.items():
+        pred_log = model.predict(X_full_minilm_p)
+        predictions_minilm[f"{model_name}_MiniLM"] = np.expm1(pred_log)
+        predictions_minilm[f"{model_name}_MiniLM"] = np.where(np.isnan(predictions_minilm[f"{model_name}_MiniLM"]), 0, predictions_minilm[f"{model_name}_MiniLM"])
     
-    predictions_df = pd.DataFrame(predictions)
+    # RoBERTa predictions
+    X_full_roberta_p = preproc_roberta.transform(X_raw_roberta.reset_index(drop=True))
+    print(f"Full RoBERTa dataset shape after preprocessing: {X_full_roberta_p.shape}")
+    
+    predictions_roberta = {}
+    for model_name, model in best_models_roberta.items():
+        pred_log = model.predict(X_full_roberta_p)
+        predictions_roberta[f"{model_name}_RoBERTa"] = np.expm1(pred_log)
+        predictions_roberta[f"{model_name}_RoBERTa"] = np.where(np.isnan(predictions_roberta[f"{model_name}_RoBERTa"]), 0, predictions_roberta[f"{model_name}_RoBERTa"])
+    
+    # Combine predictions
+    predictions_df = pd.DataFrame({**predictions_minilm, **predictions_roberta})
     band_counts_orig, percentages = create_detailed_outcome_bands_visualization(predictions_df, output_dir)
 
     # Final summary including actual outcomes
+    all_models = list(best_models_minilm.keys()) + list(best_models_roberta.keys())
     final_summary = {
         'analysis_completed': str(datetime.now()),
-        'total_projects_analyzed': len(X_raw),
-        'models_trained': list(best_models.keys()),
+        'total_projects_analyzed': len(X_raw_minilm),
+        'embedding_types_compared': ['minilm', 'roberta'],
+        'models_trained': all_models,
         'best_performing_model': res_df.iloc[0]['model'],
         'actual_outcome_distribution': {
             'counts': band_counts_actual.to_dict(),
@@ -951,12 +1110,13 @@ def main(data_path):
         'files_generated': {
             'model_comparison': 'model_comparison.csv',
             'model_summary': 'model_summary.json',
-            'joblib_files': [f'best_{name}.joblib' for name in best_models.keys()],
-            'params_files': [f'best_{name}_params.json' for name in best_models.keys()],
-            'shap_files': [f'shap_{name}_top_*_features.png' for name in best_models.keys()],
-            'shap_bar_charts': [f'shap_{name}_bar_chart.png' for name in best_models.keys()],
-            'shap_importance_files': [f'shap_feature_importance_{name}.csv' for name in best_models.keys()],
-            'shap_summary_files': [f'shap_summary_{name}.json' for name in best_models.keys()],
+            'r2_comparison': 'r2_comparison_minilm_vs_roberta.png',
+            'joblib_files': [f'best_{name}.joblib' for name in all_models],
+            'params_files': [f'best_{name}_params.json' for name in all_models],
+            'shap_files': [f'shap_{name}_top_*_features.png' for name in all_models],
+            'shap_bar_charts': [f'shap_{name}_bar_chart.png' for name in all_models],
+            'shap_importance_files': [f'shap_feature_importance_{name}.csv' for name in all_models],
+            'shap_summary_files': [f'shap_summary_{name}.json' for name in all_models],
             'outcome_visualizations': ['predicted_outcomes_bands_detailed.png', 'predicted_outcomes_bands_percentage.png'],
             'actual_outcome_files': ['actual_outcomes_summary_detailed.csv', 'actual_outcomes_percentages.csv']
         }
@@ -965,9 +1125,11 @@ def main(data_path):
     with open(os.path.join(output_dir, 'analysis_summary.json'), 'w') as f:
         json.dump(final_summary, f, indent=2)
 
-    print(f"Total rows processed: {len(predictions_df)} out of {len(X_raw)} expected.")
+    print(f"Total rows processed: {len(predictions_df)} out of {len(X_raw_minilm)} expected.")
     print(f"\n{datetime.now()} Analysis Complete")
     print(f"\nAll files saved to: {output_dir}")
+    print(f"Embedding types compared: {final_summary['embedding_types_compared']}")
+    print(f"Total models trained: {len(all_models)}")
     print("Generated files:")
     for category, files in final_summary['files_generated'].items():
         if isinstance(files, list):
@@ -976,10 +1138,9 @@ def main(data_path):
             print(f"  {category}: {files}")
 
 if __name__ == "__main__":
-    data_path = "/Users/kerenlint/Projects/Afeka/models_weight/all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json"
+    data_path = "/Users/kerenlint/Projects/cursor/projects_with_short_stories_and_risks_with_embeddings.json"
     try:
         main(data_path)
     except Exception as e:
         print(f"Fatal error: {e}")
         traceback.print_exc()
-

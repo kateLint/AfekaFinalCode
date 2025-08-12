@@ -1,3 +1,6 @@
+# =========================
+# Imports & Global Config
+# =========================
 import pandas as pd
 import numpy as np
 import json
@@ -44,7 +47,26 @@ import gc
 warnings.filterwarnings('ignore')
 gc.enable()
 
+# =========================
+# Configuration
+# =========================
+# All global configuration variables are defined here for clarity and maintainability.
+n_search_iter = 5
+search_cv_folds = 5
+outer_cv_folds = 5
+output_dir = "classification_results_final_compare"
+model_configs = [
+    ("Traditional_Features_Only_Weight", None, "NO_EMBEDDINGS", False),
+    ("Features_MiniLM_Weight", 'minilm', None, False),
+    ("Features_RoBERTa_Weight", 'roberta', None, False),
+    ("Features_ModernBERT_Weight", 'modernbert', None, False),
+    ("MiniLM_Only_Weight", 'minilm', "ONLY_EMBEDDINGS", False),
+    ("RoBERTa_Only_Weight", 'roberta', "ONLY_EMBEDDINGS", False),
+    ("ModernBERT_Only_Weight", 'modernbert', "ONLY_EMBEDDINGS", False),
+]
+
 def get_bayes_search_space(model_key):
+    """Return search space for BayesSearchCV by model type."""
     if model_key == 'RandomForest':
         return {
             'classifier__n_estimators': Integer(100, 600),
@@ -91,21 +113,62 @@ def get_bayes_search_space(model_key):
     return {}
 
 def safe_float(value, default=np.nan):
+    """Convert value to float, return default if fails."""
     if value is None: return default
     try:
         f_val = float(value)
         return default if not np.isfinite(f_val) else f_val
     except (ValueError, TypeError): return default
 
+# =========================
+# Helper Functions (for DRY)
+# =========================
+def save_dataframe_to_csv(df, path, round_decimals=5):
+    """Helper to save DataFrame to CSV with rounding and error handling."""
+    try:
+        df.round(round_decimals).to_csv(path, index=False, encoding='utf-8')
+        print(f"\nRaw results saved: {path}")
+    except Exception as e:
+        print(f"Error saving raw results: {e}")
+
+def save_formatted_results_by_config(all_results, output_dir):
+    """Helper to save formatted results for each config as markdown."""
+    results_by_config = defaultdict(list)
+    for res in all_results:
+        results_by_config[res['Model Config']].append(res)
+    for config_name, config_results in results_by_config.items():
+        safe_config_name = config_name.replace(' ', '_').replace('/', '_').replace(':', '_')
+        formatted_path = os.path.join(output_dir, f"formatted_results_{safe_config_name}.md")
+        try:
+            print_formatted_results(config_results, output_file=formatted_path)
+        except Exception as e:
+            print(f"⚠️ Error writing per-model formatted output for {config_name}: {e}")
+
+def save_feature_importance(final_model, feature_names, full_model_name, output_dir, feature_importance_dict):
+    """Helper to extract and save feature importance, and update the dict."""
+    try:
+        importance_df = get_feature_importance(final_model, feature_names, full_model_name, output_dir)
+        if isinstance(importance_df, pd.DataFrame) and not importance_df.empty:
+            feature_importance_dict[full_model_name] = importance_df
+        else:
+            print("    Feature importance yielded no results.")
+    except Exception as imp_e:
+        print(f"  Error during feature importance extraction: {imp_e}")
+        traceback.print_exc()
+
+# =========================
+# Data Processing Functions
+# =========================
 def extract_features(data, embedding_type=None):
+    """Extract features and embeddings from raw data."""
     features = []
     embedding_dimensions = 0
     target_counts = {'successful': 0, 'other': 0, 'skipped_no_state': 0}
     processed_ids = set()
     embedding_keys = {
-        'minilm': ('story_miniLM', 'risks_miniLM'),
-        'roberta': ('story_roberta', 'risks-and-challenges_roberta'),
-        'modernbert': ('story_modernbert', 'risks_modernbert')
+        'minilm': ('story_minilm_embedding', 'risk_minilm_embedding'),
+        'roberta': ('story_roberta_embedding', 'risk_roberta_embedding'),
+        'modernbert': ('story_modernbert_embedding', 'risk_modernbert_embedding')
     }
     print(f"Starting feature extraction for {len(data)} items...")
     extraction_errors = 0
@@ -177,8 +240,8 @@ def extract_features(data, embedding_type=None):
                         return True
                     return False
 
-                story_added = add_embeddings_to_dict(f'story_{embedding_type_lower}', story_emb, feature_dict)
-                risks_added = add_embeddings_to_dict(f'risks_{embedding_type_lower}', risks_emb, feature_dict)
+                story_added = add_embeddings_to_dict(f'story_{embedding_type_lower}_embedding', story_emb, feature_dict)
+                risks_added = add_embeddings_to_dict(f'risk_{embedding_type_lower}_embedding', risks_emb, feature_dict)
                 if embedding_dimensions == 0 and current_item_emb_dim > 0 and (story_added or risks_added):
                     embedding_dimensions = current_item_emb_dim
             features.append(feature_dict)
@@ -222,6 +285,7 @@ def extract_features(data, embedding_type=None):
     return df, approx_dim
 
 def preprocess_data_base(X, y):
+    """Impute and clean feature matrix."""
     print(f"Base Preprocessing data shape: X={X.shape}, y={len(y)}")
 
     if not isinstance(X, pd.DataFrame):
@@ -260,7 +324,11 @@ def preprocess_data_base(X, y):
     print(f"Preprocessing complete. Final X shape: {X_imputed.shape}")
     return X_imputed.values, y_array, original_columns
 
+# =========================
+# Scoring Functions
+# =========================
 def specificity(y_true, y_pred):
+    """Custom specificity scorer for binary classification."""
     try:
         cm = confusion_matrix(y_true, y_pred)
         if cm.shape == (2, 2): tn, fp, fn, tp = cm.ravel(); return tn / (tn + fp) if (tn + fp) > 0 else 0.0
@@ -275,7 +343,11 @@ def specificity(y_true, y_pred):
     except Exception as e: print(f"Error calculating specificity: {e}. Returning 0."); return 0.0
 specificity_scorer = make_scorer(specificity, greater_is_better=True)
 
+# =========================
+# Model Training & Evaluation
+# =========================
 def get_feature_importance(model, feature_names, model_name_full, output_dir):
+    """Extract feature importances from trained model."""
     print(f"\nCalculating feature importance for {model_name_full}...")
     importances = None; final_estimator = model; final_estimator_name = "N/A"
     if hasattr(model, 'steps'):
@@ -323,6 +395,7 @@ def get_feature_importance(model, feature_names, model_name_full, output_dir):
     except Exception as e: print(f"  Error calculating importance: {e}"); traceback.print_exc(); return pd.DataFrame()
 
 def print_formatted_results(results_list, output_file=None):
+    """Format and print model results as markdown table."""
     if not results_list: print("No results to format."); return ""
     output_lines = []; headers = ["Model Config", "Classifier", "F1 (w)", "Recall (w)", "Prec (w)", "Specificity", "AUC", "Fit Time(s)", "WEIGHT K", "Pred Success", "Pred Failed", "Best Params / Status"]
     output_lines.append("| " + " | ".join(headers) + " |"); output_lines.append("|" + "---|"*len(headers))
@@ -358,7 +431,11 @@ WEIGHT: Config-dependent
         except Exception as e: print(f"Error saving formatted results: {e}")
     return formatted_text
 
+# =========================
+# Visualization Functions
+# =========================
 def plot_classification_results(results_df, save_dir):
+    """Plot model comparison barplots for key metrics."""
     if results_df.empty: print("No results to plot."); return
     viz_dir = os.path.join(save_dir, 'visualizations'); os.makedirs(viz_dir, exist_ok=True); sns.set(style='whitegrid', context='talk')
     metrics = ['F1 Weighted', 'Recall Weighted', 'Precision Weighted', 'Specificity', 'AUC', 'Mean Fit Time']
@@ -382,6 +459,7 @@ def plot_classification_results(results_df, save_dir):
     print(f"\nVisualizations saved to {viz_dir}")
 
 def visualize_feature_importance(feature_importance_dict, top_n=25, save_path=None):
+    """Plot feature importances for all models."""
     valid_dict = {k: v for k, v in feature_importance_dict.items() if isinstance(v, pd.DataFrame) and not v.empty}
     if not valid_dict: print("No feature importance data to visualize."); return
     n_models = len(valid_dict); fig_height = max(8, top_n * 0.35) * n_models
@@ -398,6 +476,7 @@ def visualize_feature_importance(feature_importance_dict, top_n=25, save_path=No
     plt.close(fig)
 
 def plot_prediction_counts(results_df, save_dir):
+    """Plot prediction counts and success rates for each model."""
     """Create visualizations for prediction counts"""
     if results_df.empty: 
         print("No results to plot prediction counts.")
@@ -474,7 +553,11 @@ def plot_prediction_counts(results_df, save_dir):
     except Exception as e:
         print(f"Error saving prediction summary: {e}")
 
+# =========================
+# Main Pipeline
+# =========================
 def main_classification():
+    """Main pipeline for training, evaluation, and reporting."""
     global output_dir, model_configs
     output_dir = 'classification_results_weighted_compare_final'
     os.makedirs(output_dir, exist_ok=True)
@@ -482,7 +565,7 @@ def main_classification():
 
     print("\nLoading data...")
     try:
-        data_path = '/Users/kerenlint/Projects/Afeka/models/all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json'
+        data_path = "/Users/kerenlint/Projects/cursor/projects_with_short_stories_and_risks_with_embeddings.json"
         print(f"Attempting load from: {data_path}")
         if not os.path.exists(data_path): print(f"CRITICAL Error: Data file not found: {data_path}"); return
         with open(data_path, 'r') as f: data = json.load(f)
@@ -491,19 +574,6 @@ def main_classification():
     except Exception as e: print(f"CRITICAL Error loading data: {e}"); traceback.print_exc(); return
 
     all_results = []; feature_importance_dict = {}
-
-    model_configs = [
-        ("Traditional_Features_Only_Weight", None, "NO_EMBEDDINGS", False),
-        ("Features_MiniLM_Weight", 'minilm', None, False),
-        ("Features_RoBERTa_Weight", 'roberta', None, False),
-        ("Features_ModernBERT_Weight", 'modernbert', None, False),
-        ("MiniLM_Only_Weight", 'minilm', "ONLY_EMBEDDINGS", False),
-        ("RoBERTa_Only_Weight", 'roberta', "ONLY_EMBEDDINGS", False),
-        ("ModernBERT_Only_Weight", 'modernbert', "ONLY_EMBEDDINGS", False),
-    ]
-
-    print(f"\nDefined {len(model_configs)} specific feature configurations for comparison:")
-    for cfg in model_configs: print(f"  - {cfg[0]} (Embedding: {cfg[1]}, Filter: {cfg[2]}, WEIGHT: {cfg[3]})")
 
     classifiers = {
         'RandomForest': RandomForestClassifier(random_state=42, n_jobs=-1),
@@ -516,7 +586,6 @@ def main_classification():
     }
     print(f"\nClassifiers to compare: {list(classifiers.keys())}")
 
-    global n_search_iter, search_cv_folds, outer_cv_folds
     cv_strategy_outer = StratifiedKFold(n_splits=outer_cv_folds, shuffle=True, random_state=42)
     print(f"BayesSearch: n_iter={n_search_iter}, cv={search_cv_folds}, n_jobs=-1")
     print(f"Outer Evaluation: Stratified {outer_cv_folds}-Fold CV, n_jobs=-1")
@@ -858,16 +927,7 @@ def main_classification():
                         final_model_for_importance = clone(best_model)
                         final_model_for_importance.fit(fit_on_base_data, fit_on_base_target)
                         if final_model_for_importance and original_feature_names:
-                            importance_df = get_feature_importance(
-                                final_model_for_importance,
-                                original_feature_names,
-                                full_model_name,
-                                output_dir
-                            )
-                            if isinstance(importance_df, pd.DataFrame) and not importance_df.empty:
-                                feature_importance_dict[full_model_name] = importance_df
-                            else:
-                                print("    Feature importance yielded no results.")
+                            save_feature_importance(final_model_for_importance, original_feature_names, full_model_name, output_dir, feature_importance_dict)
                         else:
                             print("    Skipping importance: model or feature names missing.")
                         del fit_on_base_data, fit_on_base_target
@@ -952,24 +1012,12 @@ def main_classification():
     results_csv_path = os.path.join(output_dir, 'classification_model_results_summary.csv')
     formatted_output_path = os.path.join(output_dir, 'formatted_classification_results_summary.md')
     try: 
-        results_df.round(5).to_csv(results_csv_path, index=False, encoding='utf-8')
-        print(f"\nRaw results saved: {results_csv_path}")
+        save_dataframe_to_csv(results_df, results_csv_path)
     except Exception as e: 
         print(f"Error saving raw results: {e}")
     
     try:
-        results_by_config = defaultdict(list)
-        for res in all_results:
-            results_by_config[res['Model Config']].append(res)
-
-        for config_name, config_results in results_by_config.items():
-            safe_config_name = config_name.replace(' ', '_').replace('/', '_').replace(':', '_')
-            formatted_path = os.path.join(output_dir, f"formatted_results_{safe_config_name}.md")
-            try:
-                print_formatted_results(config_results, output_file=formatted_path)
-            except Exception as e:
-                print(f"⚠️ Error writing per-model formatted output for {config_name}: {e}")
-
+        save_formatted_results_by_config(all_results, output_dir)
     except Exception as e: 
         print(f"Error generating formatted results: {e}")
         traceback.print_exc()
@@ -1001,13 +1049,6 @@ def main_classification():
 
 if __name__ == "__main__":
     script_start_time = time.time()
-
-    n_search_iter = 5
-    search_cv_folds = 5
-    outer_cv_folds = 5
-
-    output_dir = "classification_results_final_compare"
-    model_configs = []
 
     print("+"*30 + " Starting FINAL Classification Analysis Script " + "+"*30)
     print("Comparing Feature Sets:")

@@ -92,6 +92,12 @@ class Config:
     # Performance settings
     enable_logging: bool = True
     log_level: str = "INFO"
+
+    # Paraphraser long-input settings
+    paraphrase_input_max_tokens: int = 480   # tokens per chunk (slightly less than 512 for BOS/EOS tokens)
+    paraphrase_stride: int = 80              # overlap between chunks to reduce aggressive cutting
+    paraphrase_join_by: str = "sentence"     # "sentence" or "paragraph"
+    paraphrase_max_new_tokens: int = 256     # max output length per chunk (preferred over max_length)
     
     def validate(self) -> None:
         """Validate configuration settings."""
@@ -135,27 +141,31 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 def check_dependencies() -> bool:
     """Check if all required dependencies are available."""
     missing_deps = []
-    
     try:
-        import psutil
+        import psutil  # noqa: F401
     except ImportError:
         missing_deps.append("psutil")
-    
+
     try:
         import nltk
-        nltk.data.find('tokenizers/punkt')
-    except (ImportError, LookupError):
-        missing_deps.append("nltk punkt tokenizer")
         try:
+            nltk.data.find('tokenizers/punkt')
+        except LookupError:
             nltk.download('punkt')
-        except Exception as e:
-            LOGGER.warning(f"Failed to download punkt: {e}")
-    
+        # Some environments require this too
+        try:
+            nltk.data.find('tokenizers/punkt_tab')
+        except LookupError:
+            nltk.download('punkt_tab')
+    except Exception as e:
+        LOGGER.warning(f"NLTK init failed: {e}")
+        missing_deps.append("nltk (or subpackages)")
+
     if missing_deps:
         LOGGER.warning(f"Missing optional dependencies: {missing_deps}")
         return False
-    
     return True
+
 
 # Check dependencies
 check_dependencies()
@@ -190,6 +200,136 @@ class Models:
     device: torch.device
     roberta_tokenizer: Any 
 
+def _count_tokens(text: str, tokenizer) -> int:
+    return len(tokenizer.encode(text, add_special_tokens=True, truncation=False))
+
+def _split_to_units(text: str, by: str = "sentence") -> List[str]:
+    text = validate_text_input(text, "paraphrase_text")
+    if by == "paragraph":
+        units = [u.strip() for u in text.split("\n") if u.strip()]
+    else:
+        units = sent_tokenize(text)
+    return units
+
+def _pack_units_to_chunks(
+    units: List[str],
+    tokenizer,
+    max_tokens: int,
+    stride: int
+) -> List[str]:
+    """
+    Packs sentences/paragraphs into chunks within token limits, with optional overlap.
+    If a single unit > max_tokens, it will be safely cut into sub-parts.
+    """
+    chunks: List[str] = []
+    current: List[str] = []
+    current_tokens = 0
+
+    for u in units:
+        utoks = _count_tokens(u, tokenizer)
+
+        # Single unit too long — safely cut into sub-parts
+        if utoks > max_tokens:
+            ids = tokenizer.encode(u, add_special_tokens=True, truncation=False)
+            step = max_tokens - 2 if max_tokens > 2 else max_tokens
+            for s in range(0, len(ids), step):
+                sub_ids = ids[s:s+step]
+                sub_txt = tokenizer.decode(sub_ids, skip_special_tokens=True)
+                if sub_txt.strip():
+                    chunks.append(sub_txt.strip())
+            continue
+
+        # Add to current if it fits
+        if current_tokens + utoks <= max_tokens:
+            current.append(u)
+            current_tokens += utoks
+        else:
+            # Close chunk
+            if current:
+                chunks.append(" ".join(current))
+
+            # Overlap
+            if stride > 0 and current:
+                overlap: List[str] = []
+                tok_budget = 0
+                for sent in reversed(current):
+                    t = _count_tokens(sent, tokenizer)
+                    if tok_budget + t <= stride:
+                        overlap.insert(0, sent)
+                        tok_budget += t
+                    else:
+                        break
+                current = overlap + [u]
+                current_tokens = sum(_count_tokens(s, tokenizer) for s in current)
+            else:
+                current = [u]
+                current_tokens = utoks
+
+    if current:
+        chunks.append(" ".join(current))
+
+    # Clean double spaces
+    return [" ".join(c.split()) for c in chunks if c.strip()]
+
+def paraphrase_long_text(
+    text: str,
+    params: Dict[str, Any],
+    num_return: int = 1,
+    join_by: str = None,
+) -> List[str]:
+    """
+    Paraphrase text of any length: chunks by tokens + overlap, generate for each chunk, merge variations.
+    """
+    tokenizer = MODELS.paraphraser_tokenizer
+    model = MODELS.paraphraser_model
+
+    join_by = join_by or CONFIG.paraphrase_join_by
+    units = _split_to_units(text, by=join_by)
+    chunks = _pack_units_to_chunks(
+        units,
+        tokenizer,
+        max_tokens=CONFIG.paraphrase_input_max_tokens,
+        stride=CONFIG.paraphrase_stride,
+    )
+    if not chunks:
+        return [""]
+
+    # Prepare generate parameters: remove max_length and use max_new_tokens
+    gen_params = dict(params or {})
+    gen_params.pop("max_length", None)
+    gen_params.setdefault("max_new_tokens", CONFIG.paraphrase_max_new_tokens)
+    gen_params.setdefault("do_sample", True)
+    gen_params.setdefault("num_beams", max(1, min(num_return, 4)))
+
+    per_chunk_variants: List[List[str]] = []
+    for ch in chunks:
+        input_text = f"paraphrase: {ch} </s>"
+        inputs = tokenizer.encode(input_text, return_tensors="pt", truncation=False).to(MODELS.device)
+        with torch.no_grad():
+            outs = model.generate(
+                inputs,
+                num_return_sequences=num_return,
+                **gen_params,
+            )
+        variants = [clean_paraphrase(tokenizer.decode(o, skip_special_tokens=True)) for o in outs]
+        # Safety: if model returned fewer variations, duplicate/replicate
+        if len(variants) < num_return and variants:
+            variants = variants + [variants[-1]] * (num_return - len(variants))
+        per_chunk_variants.append(variants or [""])
+
+    # Merge: for each k, take the k-th variation from each chunk and join
+    results: List[str] = []
+    for k in range(num_return):
+        parts = []
+        for variants in per_chunk_variants:
+            v = variants[k] if k < len(variants) else variants[-1] if variants else ""
+            parts.append(v)
+        full = " ".join(parts)
+        # Double cleaning for overlap cases
+        full = clean_paraphrase(full)
+        results.append(full)
+
+    return results
 
 
 def load_models() -> Models:
@@ -632,8 +772,8 @@ def predict_success_probability(df_aligned: pd.DataFrame) -> float:
         proba = MODELS.clf_model.predict_proba(df_aligned)[0, 1]
         prediction_time = time.time() - start_time
         
-        LOGGER.debug(f"Prediction completed in {prediction_time:.3f} seconds")
-        LOGGER.info(f"Success probability: {proba:.2%}")
+        #LOGGER.debug(f"Prediction completed in {prediction_time:.3f} seconds")
+       # LOGGER.info(f"Success probability: {proba:.2%}")
         
         return float(proba)
         
@@ -642,27 +782,53 @@ def predict_success_probability(df_aligned: pd.DataFrame) -> float:
         return 0.0
 
 
+def score_candidate(
+    df_template: pd.DataFrame,
+    story_text: str,
+    risks_text: str,
+    target: Section,
+    candidate_text: str,
+) -> Tuple[float, float, bool]:
+    """
+    Returns: (prob, coherence, is_strong)
+    """
+    base_story = story_text or ""
+    base_risks = risks_text or ""
+    if target == Section.STORY:
+        new_story, new_risks = candidate_text, base_risks
+        coherence = multi_sentence_coherence_score(base_story, new_story)
+    else:
+        new_story, new_risks = base_story, candidate_text
+        coherence = multi_sentence_coherence_score(base_risks, new_risks)
+
+    df = df_template.copy()
+    fill_roberta_embeddings(df, new_story, new_risks)
+    prob = predict_success_probability(df)
+    is_strong = coherence >= CONFIG.coherence_threshold
+    return prob, coherence, is_strong
+
+
+from enum import Enum
+
+class Section(Enum):
+    STORY = "story"
+    RISKS = "risks"
 # =========================
 # Paraphrasing & Scoring
 # =========================
 
 def generate_paraphrases(text: str, params: dict, num_return: int = 4) -> List[str]:
-    input_text = f"paraphrase: {text} </s>"
-    inputs = MODELS.paraphraser_tokenizer.encode(
-        input_text, return_tensors="pt", max_length=512, truncation=True
-    ).to(MODELS.device)
     try:
-        outputs = MODELS.paraphraser_model.generate(
-            inputs,
-            num_return_sequences=num_return,
-            do_sample=True,
-            num_beams=max(1, min(num_return, 4)),
-            **params,
+        return paraphrase_long_text(
+            text=validate_text_input(text, "paraphrase_text"),
+            params=params or {},
+            num_return=max(1, int(num_return)),
+            join_by=CONFIG.paraphrase_join_by,
         )
-        return [clean_paraphrase(MODELS.paraphraser_tokenizer.decode(o, skip_special_tokens=True)) for o in outputs]
     except Exception as e:
-        print(f"Error generating paraphrases: {e}")
+        LOGGER.error(f"Paraphrase generation failed: {e}")
         return []
+
 
 
 def multi_sentence_coherence_score(orig: str, para: str) -> float:
@@ -679,39 +845,56 @@ def multi_sentence_coherence_score(orig: str, para: str) -> float:
     return float(np.mean(sims)) if sims else 0.0
 
 
-def get_quick_suggestions(
+def get_quick_suggestions_section(
+    story: str,
+    risks: str,
+    df_template: pd.DataFrame,
+    target: Section,
+    num_return: int = 1,
+    coherence_threshold: float = None,
+) -> List[Dict[str, Any]]:
+    coherence_threshold = float(coherence_threshold or CONFIG.coherence_threshold)
+    presets = [
+        {"top_k": 40, "top_p": 0.92, "temperature": 1.0, "max_new_tokens": CONFIG.paraphrase_max_new_tokens},
+        {"top_k": 80, "top_p": 0.95, "temperature": 1.2, "max_new_tokens": CONFIG.paraphrase_max_new_tokens},
+        {"top_k": 60, "top_p": 0.88, "temperature": 0.9, "max_new_tokens": CONFIG.paraphrase_max_new_tokens},
+    ]
+
+    base_text = story if target == Section.STORY else risks
+    results: List[Dict[str, Any]] = []
+
+    for preset in presets:
+        cands = generate_paraphrases(base_text, preset, num_return=num_return)
+        for txt in cands:
+            prob, coh, is_strong = score_candidate(df_template, story, risks, target, txt)
+            results.append({
+                "target": target.value,
+                "text": clean_paraphrase(txt),
+                "prob": prob,
+                "coherence": coh,
+                "is_strong": is_strong,
+                "params": preset,
+                "theme": extract_keyphrases(txt),
+            })
+
+    results.sort(key=lambda r: r["prob"], reverse=True)
+    return results
+
+
+def get_quick_suggestions_both(
     story: str,
     risks: str,
     df_template: pd.DataFrame,
     num_return: int = 1,
-    coherence_threshold: float = 0.60,
+    coherence_threshold: float = None,
 ) -> List[Dict[str, Any]]:
-    presets = [
-        {"top_k": 40, "top_p": 0.92, "temperature": 1.0, "max_length": 512},
-        {"top_k": 80, "top_p": 0.95, "temperature": 1.2, "max_length": 512},
-        {"top_k": 60, "top_p": 0.88, "temperature": 0.9, "max_length": 512},
-    ]
-    results: List[Dict[str, Any]] = []
+    """Return a merged, probability-sorted list for both sections."""
+    a = get_quick_suggestions_section(story, risks, df_template, Section.STORY, num_return, coherence_threshold)
+    b = get_quick_suggestions_section(story, risks, df_template, Section.RISKS, num_return, coherence_threshold)
+    merged = (a + b)
+    merged.sort(key=lambda r: r["prob"], reverse=True)
+    return merged
 
-    for preset in presets:
-        for txt in generate_paraphrases(story, preset, num_return=num_return):
-            df = df_template.copy()
-            fill_roberta_embeddings(df, txt, risks)
-            prob = predict_success_probability(df)
-            coh = multi_sentence_coherence_score(story, txt)
-            results.append(
-                {
-                    "text": txt,
-                    "prob": prob,
-                    "coherence": coh,
-                    "is_strong": coh >= coherence_threshold,
-                    "params": preset,
-                    "theme": extract_keyphrases(txt),
-                }
-            )
-
-    results.sort(key=lambda r: r["prob"], reverse=True)
-    return results
 
 
 def explain_params(params: Dict[str, float]) -> List[str]:
@@ -737,42 +920,42 @@ def explain_params(params: Dict[str, float]) -> List[str]:
     return out
 
 
-def optimize_paraphrase_optuna(
+def optimize_paraphrase_optuna_section(
     original_story: str,
-    risks: str,
+    original_risks: str,
     df_template: pd.DataFrame,
-    coherence_threshold: float = 0.60,
-    n_trials: int = 10,
+    target: Section,
+    coherence_threshold: float = None,
+    n_trials: int = None,
 ) -> Tuple[str, float, dict, List[str]]:
+    coherence_threshold = float(coherence_threshold or CONFIG.coherence_threshold)
+    n_trials = int(n_trials or CONFIG.optuna_trials)
+
+    base_text = original_story if target == Section.STORY else original_risks
+
     def objective(trial: optuna.trial.Trial) -> float:
-        # Show progress
         current_trial = trial.number + 1
-        progress = (current_trial / n_trials) * 100
-        print(f"\r🔄 Trial {current_trial}/{n_trials} ({progress:.1f}%) - Testing parameters...", end="", flush=True)
-        
+        print(f"\r🔄 {target.value.upper()} Trial {current_trial}/{n_trials} …", end="", flush=True)
+
         params = {
             "top_k": trial.suggest_int("top_k", 20, 150),
             "top_p": trial.suggest_float("top_p", 0.85, 0.98),
             "temperature": trial.suggest_float("temperature", 0.8, 1.5),
-            "max_length": 512,
+            "max_new_tokens": CONFIG.paraphrase_max_new_tokens,
         }
-        cands = generate_paraphrases(original_story, params, num_return=2)
+
+        # Two candidates per trial for stability
+        cands = generate_paraphrases(base_text, params, num_return=2)
         best = 0.0
         best_txt = ""
         for txt in cands:
-            coh = multi_sentence_coherence_score(original_story, txt)
+            prob, coh, _ = score_candidate(df_template, original_story, original_risks, target, txt)
             if coh < coherence_threshold:
                 continue
-            df = df_template.copy()
-            fill_roberta_embeddings(df, txt, risks)
-            prob = predict_success_probability(df)
             if prob > best:
                 best = prob
                 best_txt = txt
-        
-        # Show current best result
-        print(f"\r🔄 Trial {current_trial}/{n_trials} ({progress:.1f}%) - Best so far: {best:.2%}", end="", flush=True)
-        
+
         trial.set_user_attr("paraphrase", best_txt)
         return best
 
@@ -782,14 +965,28 @@ def optimize_paraphrase_optuna(
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1),
     )
     study.optimize(objective, n_trials=n_trials)
-    
-    # Clear the progress line and show completion
-    print(f"\r✅ Optimization completed! ({n_trials}/{n_trials} trials - 100%)")
+    print("\r✅ Optimization completed for", target.value)
 
     best_txt = study.best_trial.user_attrs.get("paraphrase", "")
     best_prob = float(study.best_value)
     best_params = study.best_params
     return best_txt, best_prob, best_params, explain_params(best_params)
+
+
+def evaluate_combined(
+    df_template: pd.DataFrame,
+    original_story: str,
+    original_risks: str,
+    best_story: str,
+    best_risks: str
+) -> Dict[str, Any]:
+    df = df_template.copy()
+    story_final = best_story or original_story
+    risks_final = best_risks or original_risks
+    fill_roberta_embeddings(df, story_final, risks_final)
+    prob = predict_success_probability(df)
+    return {"prob": float(prob), "story": story_final, "risks": risks_final}
+
 
 
 def run_optuna_async(original_story: str, risks: str, df_template: pd.DataFrame) -> None:
@@ -832,50 +1029,113 @@ def run_optuna_async(original_story: str, risks: str, df_template: pd.DataFrame)
 
     threading.Thread(target=task, daemon=True).start()
 
+def print_ranked_section_probs(story_sugs: List[Dict[str, Any]], risks_sugs: List[Dict[str, Any]]) -> None:
+    """Print 'story1 prob, story2 prob, ...' then 'risk1 prob, ...' in order."""
+    # STORY first
+    print("\n🧾 Ranked Probabilities")
+    print("STORY:")
+    for i, s in enumerate(story_sugs, start=1):
+        print(f"  story{i}: {s['prob']:.2%}")
+    # RISKS next
+    print("RISKS:")
+    for i, s in enumerate(risks_sugs, start=1):
+        print(f"  risk{i}:  {s['prob']:.2%}")
+
+def print_suggestion_block(sug: Dict[str, Any], idx: int, section: str) -> None:
+    """Pretty-print a suggestion in the exact multi-line style requested."""
+    title = f"🔹 Suggestion #{idx} [{section.upper()}]"
+    theme = f"🧠 Theme: {sug.get('theme','N/A')}"
+    text = textwrap.fill(sug.get("text", ""), width=100)
+    prob = float(sug.get("prob", 0.0))
+    vis = render_score_bar(prob)
+    params = sug.get("params", {})
+    top_k = params.get("top_k", "N/A")
+    top_p = params.get("top_p", "N/A")
+    temperature = params.get("temperature", "N/A")
+    coh = float(sug.get("coherence", 0.0))
+    strong = "✅ Strong" if sug.get("is_strong", False) else "⚠️ Weak"
+
+    print(title)
+    print(theme)
+    print(text)
+    print(f"✅ Success Probability: {prob:.2%}")
+    print(f"📈 Visual Score: {vis} ({prob:.2%})")
+    print(f"🧪 Params: top_k={top_k}, top_p={top_p}, temperature={temperature}")
+    print(f"🧠 Coherence: {coh:.2f} {strong}")
+
+def get_quick_suggestions_grouped(
+    story: str,
+    risks: str,
+    df_template: pd.DataFrame,
+    num_return: int = 1,
+    coherence_threshold: float = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    s_list = get_quick_suggestions_section(
+        story, risks, df_template, Section.STORY, num_return=num_return, coherence_threshold=coherence_threshold
+    )
+    r_list = get_quick_suggestions_section(
+        story, risks, df_template, Section.RISKS, num_return=num_return, coherence_threshold=coherence_threshold
+    )
+    s_list.sort(key=lambda r: r["prob"], reverse=True)
+    r_list.sort(key=lambda r: r["prob"], reverse=True)
+    return s_list, r_list
+
+
+def evaluate_best_story_risks_pair(
+    df_template: pd.DataFrame,
+    original_story: str,
+    original_risks: str,
+    story_suggestions: List[Dict[str, Any]],
+    risks_suggestions: List[Dict[str, Any]],
+    top_k_story: int = 5,
+    top_k_risks: int = 5,
+) -> Dict[str, Any]:
+    if not story_suggestions or not risks_suggestions:
+        return {"best_prob": None}
+
+    best = {"best_prob": -1.0, "story_idx": None, "risks_idx": None}
+    S = story_suggestions[:max(1, top_k_story)]
+    R = risks_suggestions[:max(1, top_k_risks)]
+
+    for i, s in enumerate(S, start=1):
+        for j, r in enumerate(R, start=1):
+            df_pair = df_template.copy()
+            fill_roberta_embeddings(df_pair, s["text"] or original_story, r["text"] or original_risks)
+            prob = predict_success_probability(df_pair)
+            if prob > best["best_prob"]:
+                best.update({"best_prob": float(prob), "story_idx": i, "risks_idx": j})
+    return best
 
 # =========================
 # Example Project Input (edit as needed)
 # =========================
-project_input: Dict[str, Any] = {
-    "goal": 131421,
-    "rewardscount": 6,
-    "projectFAQsCount": 8,
-    "project_length_days": 30,
-    "preparation_days": 5,
-    "category_Web_Development": 1,
-    "story": (
-        "Innovative Device is an ambitious project aimed at revolutionizing the Gadgets industry. "
-        "While the concept behind Innovative Device was met with enthusiasm, we faced significant "
-        "challenges in securing the necessary funding and resources. The journey has been filled with "
-        "obstacles, ranging from supply chain issues to unexpected technical difficulties. Despite our "
-        "best efforts, these setbacks delayed our timeline and affected our ability to bring Innovative "
-        "Device to market at the scale we envisioned. Our hope was to introduce Innovative Device to the "
-        "Gadgets market and make a meaningful impact. Although this campaign did not reach its goal, the "
-        "feedback and support from our community have been invaluable. We will continue exploring "
-        "alternative funding options and look forward to relaunching Innovative Device in the future with "
-        "a stronger foundation."
-    ),
-    "risks": (
-        "Launching Innovative Device in the field of Gadgets comes with its own set of challenges. One of "
-        "the biggest concerns is ensuring that Innovative Device integrates seamlessly with existing "
-        "Gadgets solutions. Compatibility issues may arise, requiring extensive testing and refinements "
-        "before mass production. Additionally, sourcing high-quality components for Gadgets-specific "
-        "hardware can be time-consuming and costly. Security is another major factor. Innovative Device "
-        "will need to maintain strict data protection standards to ensure privacy and prevent cyber threats. "
-        "The regulatory landscape for Gadgets is evolving, and ensuring compliance with industry standards is "
-        "crucial for Innovative Device to be legally distributed in multiple markets. Our team is prepared to "
-        "address these risks by implementing a robust quality control process, working closely with industry "
-        "experts, and securing partnerships with reliable manufacturers to ensure a smooth launch."
-    ),
-}
-
-
+project_input: Dict[str, Any] =   {
+    
+    "goal": 161203.24,
+    "category_Virtual Reality": 1,
+    "risks": ("Launching Innovative System in the field of Virtual Reality comes with its own set of challenges. One of the biggest concerns is ensuring that Innovative System integrates seamlessly with existing Virtual Reality solutions. Compatibility issues may arise, requiring extensive testing and refinements before mass production. Additionally, sourcing high-quality components for Virtual Reality-specific hardware can be time-consuming and costly.The regulatory landscape for Virtual Reality is evolving, and ensuring compliance with industry standards is crucial for Innovative System to be legally distributed in multiple markets. Security is another major factor. Innovative System will need to maintain strict data protection standards to ensure privacy and prevent cyber threats.Our team is prepared to address these risks by implementing a robust quality control process, working closely with industry experts, and securing partnerships with reliable manufacturers to ensure a smooth launch of Innovative System in the Virtual Reality market."),
+    "story": ("Innovative System is an ambitious project aimed at revolutionizing the Virtual Reality industry. Our team has worked tirelessly to refine the concept, develop prototypes, and collaborate with industry leaders to bring this vision to life. With a strong focus on innovation, user experience, and sustainability, we have already secured partnerships with leading manufacturers and tech companies. The response from early adopters has been overwhelmingly positive, and Innovative System is now positioned to change the way people interact with Virtual Reality technology.By backing this campaign, you are helping us push the boundaries of innovation and bring Innovative System to a wider audience. Your support allows us to continue enhancing the product, ensuring that Innovative System delivers an exceptional experience. We are committed to meeting our timelines and bringing Innovative System into full production as soon as possible!"),
+    }
+  
 # =========================
 # Main
 # =========================
 if __name__ == "__main__":
     # 1) Build classifier-aligned DataFrame and fill embeddings from current texts
     df_base = build_base_dataframe(project_input, MODELS.clf_features)
+
+
+    # === STORY ONLY probability ===
+    df_story_only = df_base.copy()
+    fill_roberta_embeddings(df_story_only, project_input.get("story", ""), "")
+    story_prob = predict_success_probability(df_story_only)
+
+    # === RISKS ONLY probability ===
+    df_risks_only = df_base.copy()
+    fill_roberta_embeddings(df_risks_only, "", project_input.get("risks", ""))
+    risks_prob = predict_success_probability(df_risks_only)
+
+
     fill_roberta_embeddings(df_base, project_input.get("story", ""), project_input.get("risks", ""))
 
     # 2) Evaluate base probability
@@ -883,56 +1143,86 @@ if __name__ == "__main__":
 
     print("\n🎯 ORIGINAL STORY:")
     print(textwrap.fill(project_input.get("story", ""), width=100))
-    print(f"✅ Success Probability (combined): {combined_prob:.2%}")
+    print(f"📖 Story-only Probability: {story_prob:.2%}")
+    print("\n⚠️ ORIGINAL RISKS:")
+    print(textwrap.fill(project_input.get("risks", ""), width=100))
+    print(f"⚠️ Risks-only Probability: {risks_prob:.2%}")
+    print(f"\n🎯 Combined Probability: {combined_prob:.2%}")
     print(f"📈 Visual Score: {render_score_bar(combined_prob)} ({combined_prob:.2%})")
 
-    # 3) Quick suggestions for STORY (change num_return to >1 for more)
-    print("\n⚡ Fast Paraphrase Suggestions for STORY:")
-    suggestions = get_quick_suggestions(
+    # 3) Quick suggestions for BOTH sections
+    print("\n⚡ Paraphrase Suggestions — STORY first, then RISKS:")
+    story_sugs, risks_sugs = get_quick_suggestions_grouped(
         story=project_input.get("story", ""),
         risks=project_input.get("risks", ""),
         df_template=df_base,
         num_return=1,
     )
-    for i, s in enumerate(suggestions[:5]):
-        print(f"\n🔹 Suggestion #{i+1}")
-        print(f"🧠 Theme: {s['theme']}")
-        print(textwrap.fill(s["text"], width=100))
-        print(f"✅ Success Probability: {s['prob']:.2%}")
-        print(f"📈 Visual Score: {render_score_bar(s['prob'])} ({s['prob']:.2%})")
-        p = s["params"]
-        print(f"🧪 Params: top_k={p['top_k']}, top_p={p['top_p']}, temperature={p['temperature']}")
-        print(f"🧠 Coherence Score: {s['coherence']:.2f} {'✅ Strong' if s['is_strong'] else '⚠️ Weak'}")
 
-    # 4) Ask to run full Optuna search
-    try:
-        choice = input("\n🔧 Run full optimization with Optuna for STORY? (y/n): ").strip().lower()
-    except EOFError:
-        choice = "n"
-    if choice.startswith("y"):
-        ##run_optuna_async(project_input.get("story", ""), project_input.get("risks", ""), df_base.copy())
-        best_txt, best_prob, best_params, explanations = optimize_paraphrase_optuna(
-            project_input.get("story", ""),
-            project_input.get("risks", ""),
-            df_base.copy()
+ # --- Print ALL STORY suggestions first in your exact style ---
+    for i, s in enumerate(story_sugs, start=1):
+        print_suggestion_block(s, idx=i, section="STORY")
+
+ # --- Then ALL RISKS suggestions ---
+    for i, s in enumerate(risks_sugs, start=1):
+        print_suggestion_block(s, idx=i, section="RISKS")
+
+    best_pair = evaluate_best_story_risks_pair(
+            df_template=df_base,
+            original_story=project_input.get("story", ""),
+            original_risks=project_input.get("risks", ""),
+            story_suggestions=story_sugs,
+            risks_suggestions=risks_sugs,
+            top_k_story=len(story_sugs),  # or 3
+            top_k_risks=len(risks_sugs),  # or 3
         )
 
-        print("\n🔹 OPTUNA OPTIMIZED SUGGESTION:")
-        print(f"🧠 Theme: {extract_keyphrases(best_txt, top_n=3)}")
-        print(textwrap.fill(best_txt, width=100))
-        print(f"✅ Success Probability: {best_prob:.2%}")
+    if best_pair.get("best_prob") is not None and best_pair["story_idx"] and best_pair["risks_idx"]:
+        best_prob = best_pair["best_prob"]
+        print(f"\n🔷 Best combo is story{best_pair['story_idx']} + risk{best_pair['risks_idx']} = {best_prob:.2%}")
         print(f"📈 Visual Score: {render_score_bar(best_prob)} ({best_prob:.2%})")
-        print(f"🧪 Params: {best_params}")
-        print(f"🧠 Optimization Explanations: {explanations}")
 
+    # 4) Optional: run Optuna for both sections (interactive guard retained)
+    try:
+        choice = input("\n🔧 Run optimization with Optuna for STORY & RISKS? (y/n): ").strip().lower()
+    except EOFError:
+        choice = "n"
 
+    if choice.startswith("y"):
+        best_story_txt, best_story_prob, best_story_params, story_expl = optimize_paraphrase_optuna_section(
+            project_input["story"], project_input["risks"], df_base.copy(), Section.STORY
+        )
+        best_risks_txt, best_risks_prob, best_risks_params, risks_expl = optimize_paraphrase_optuna_section(
+            project_input["story"], project_input["risks"], df_base.copy(), Section.RISKS
+        )
 
-        
-        # Keep the program alive long enough for background thread to print some results
-        try:
-            import time
-            time.sleep(2)
-        except KeyboardInterrupt:
-            pass
+        print("\n🔹 OPTUNA RESULT — STORY:")
+        print(f"🧠 Theme: {extract_keyphrases(best_story_txt, top_n=3)}")
+        print(textwrap.fill(best_story_txt, width=100))
+        print(f"✅ Success Probability: {best_story_prob:.2%}")
+        print(f"🧪 Params: {best_story_params}")
+        print("🧠 Notes:")
+        for e in story_expl: print("•", e)
+
+        print("\n🔹 OPTUNA RESULT — RISKS:")
+        print(f"🧠 Theme: {extract_keyphrases(best_risks_txt, top_n=3)}")
+        print(textwrap.fill(best_risks_txt, width=100))
+        print(f"✅ Success Probability: {best_risks_prob:.2%}")
+        print(f"🧪 Params: {best_risks_params}")
+        print("🧠 Notes:")
+        for e in risks_expl: print("•", e)
+
+        # Combined check
+        combined_eval = evaluate_combined(
+            df_base.copy(),
+            project_input["story"],
+            project_input["risks"],
+            best_story_txt,
+            best_risks_txt
+        )
+        print("\n🔷 COMBINED (apply STORY+RISKS best):")
+        print(f"✅ Success Probability: {combined_eval['prob']:.2%}")
+        print(f"📈 Visual Score: {render_score_bar(combined_eval['prob'])} ({combined_eval['prob']:.2%})")
+
     else:
         print("\n✅ Finished with quick suggestions only. Good luck!")
