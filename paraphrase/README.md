@@ -1,299 +1,261 @@
-# Kickstarter Paraphrasing & Scoring Pipeline
+# Kickstarter AI Success Predictor & Story Optimizer
 
-**Last updated:** 2025-08-10 10:19:05
-
-This project evaluates and optimizes Kickstarter project texts (Story + Risks) by:
-- Generating paraphrases with a T5-based model
-- Embedding long texts using a RoBERTa sentence transformer with overlap-aware chunking
-- Predicting success probability with a trained XGBoost classifier
-- Searching sampling hyperparameters with Optuna to maximize predicted success
-- Providing quick suggestions and an optional optimization routine
-
-The repository includes robust logging, coherence scoring, and keyphrase extraction to help you iterate toward texts with higher projected success probability.
+This project is a **Kickstarter campaign success prediction and optimization tool** that:
+- Uses **RoBERTa embeddings**, **XGBoost classification**, and **Optuna hyperparameter tuning**  
+- Generates **paraphrased project stories** to increase predicted success probability  
+- Evaluates **coherence, key phrases, and thematic relevance**  
+- Provides **quick suggestions** or performs **full optimization**  
 
 ---
 
-## Table of Contents
-
-- [Architecture Overview](#architecture-overview)
-- [Environment & Dependencies](#environment--dependencies)
-- [Configuration](#configuration)
-- [Data & Features](#data--features)
-- [Execution Flow](#execution-flow)
-- [Models Loaded](#models-loaded)
-- [Output Walkthrough (Your Run)](#output-walkthrough-your-run)
-- [Common Issues & Debugging](#common-issues--debugging)
-- [Quality Review & Improvements](#quality-review--improvements)
-- [Project Organization](#project-organization)
-- [FAQ](#faq)
-- [Changelog](#changelog)
+## Features
+- **Prediction Pipeline**: Estimates Kickstarter campaign success probability using a trained model.
+- **Text Embedding**: Supports long text chunking & pooling for RoBERTa embeddings (768-dim).
+- **Paraphrasing**: Uses a fine-tuned T5 model to generate multiple paraphrase variations.
+- **Keyphrase Extraction**: Identifies the main themes of your campaign story.
+- **Coherence Scoring**: Measures similarity between original and paraphrased sentences.
+- **Optuna Optimization**: Finds optimal generation parameters for maximum predicted success.
+- **Logging & Health Checks**: Tracks processes and validates system components.
 
 ---
 
-## Architecture Overview
-
-### Main Components
-1. **Paraphraser**: `humarin/chatgpt_paraphraser_on_T5_base` via `transformers` to produce multiple paraphrases.
-2. **Embedder**: `sentence-transformers/roberta-base-nli-mean-tokens` for 768-d embeddings, with:
-   - Tokenization to IDs
-   - Overlap-aware chunking (max tokens = 512, stride = 64)
-   - Decoding to text chunks
-   - Batch embedding and **weighted pooling** by chunk length
-   - Optional L2 normalization
-3. **Classifier**: Pretrained XGBoost model (loaded from `*.pkl`) that expects a specific feature set loaded from `xgboost_feature_columns.json`.
-4. **Keyphrase Extraction**: KeyBERT (using the same embedding space) for quick "theme" labeling.
-5. **Coherence Scoring**: Sentence-level cosine similarity between original and paraphrase (mean across aligned sentences).
-6. **Optimization**: Optuna TPE sampler sweeps `top_k`, `top_p`, and `temperature` to maximize classifier probability, with a coherence threshold gate.
+## Requirements
+install dependences from requirements.txt
 
 ---
 
-## Environment & Dependencies
+## Environment Variables
 
-- Python 3.10+ recommended
-- GPU optional (code runs on CPU as well)
+Optional environment variables to override default paths and settings:
 
-**Core libraries**
-- `transformers`, `sentence-transformers`, `torch`, `scikit-learn`, `xgboost` (through joblib-loaded model), `pandas`, `numpy`, `optuna`, `keybert`, `nltk`
+| Variable           | Description                                     | Default                                              |
+| ------------------ | ----------------------------------------------- | ---------------------------------------------------- |
+| `KS_MODEL_PATH`    | Path to trained XGBoost model                   | `.../xgboost_kickstarter_success_model.pkl`          |
+| `KS_FEATURES_PATH` | Path to JSON list of feature columns            | `.../xgboost_feature_columns.json`                   |
 
-**Optional**
-- `psutil` (used in health check to report memory usage). Missing `psutil` only downgrades the health report; pipeline still runs.
+---
 
-**NLTK Data**
-- Requires `punkt` for sentence tokenization. The code attempts to download if missing.
+## How It Works
 
-Install example:
+1. **Load Models**
+
+   * Paraphraser: `humarin/chatgpt_paraphraser_on_T5_base`
+   * RoBERTa Embedder: configurable via `KS_ROBERTA_NAME`
+   * XGBoost Classifier: trained on Kickstarter campaign data
+   * KeyBERT: for key phrase extraction
+
+2. **Prepare Features**
+
+   * Extract numerical and categorical features from `project_input`
+   * Generate RoBERTa embeddings for `story` and `risks` text
+
+3. **Predict Probability**
+
+   * Use classifier to predict success probability based on features + embeddings
+
+4. **Generate Suggestions**
+
+   * Quick suggestions: multiple paraphrased variations ranked by probability
+   * Optuna optimization: search for the best generation parameters
+
+5. **Output Results**
+
+   * Probability scores, coherence scores, key phrases, and parameter explanations
+
+---
+
+## Usage
+
+Run the script:
+
 ```bash
-pip install torch transformers sentence-transformers scikit-learn joblib pandas numpy optuna keybert nltk psutil
-python -c "import nltk; nltk.download('punkt')"
+python main.py
 ```
 
----
+You will see:
 
-## Configuration
+* Original story and predicted success probability
+* Quick paraphrase suggestions with probabilities
+* Option to run a full Optuna optimization search
 
-All configuration is centralized in `Config`:
-- **Model paths**
-  - `model_path`: XGBoost classifier (`xgboost_kickstarter_success_model.pkl`)
-  - `features_path`: JSON with **exact** feature order expected by the classifier
-- **RoBERTa settings**: model name, embedding dimension (768), column prefixes for Story/Risks embeddings
-- **Paraphraser settings**: maximum input tokens per chunk, stride, join mode (`sentence` or `paragraph`), `max_new_tokens`
-- **Optimization**: number of Optuna trials, coherence cutoff
+Example output snippet:
 
-Validation enforces:
-- Existence of `model_path` and `features_path`
-- Positive `embed_dim`
-- Coherence threshold in [0, 1]
 
-Environment variables allow overrides (`KS_MODEL_PATH`, `KS_FEATURES_PATH`, `KS_ROBERTA_NAME`).
-
----
-
-## Data & Features
-
-### Input dictionary (`project_input`)
-Minimal numeric keys expected:
-- `goal`, `rewardscount`, `projectFAQsCount`, `project_length_days`, `preparation_days`
-
-Example category flags:
-- `category_Web_Development` (extend to your full category set)
-
-### Text fields
-- `story`: Long text describing the project
-- `risks`: Long text describing risks
-
-### Feature alignment
-`build_base_dataframe` constructs a **single-row** DataFrame aligned to the classifier’s expected columns:
-- Uses provided numeric & category features
-- Adds **missing** expected columns with zeros
-- Reorders to exact `clf_features` column order
-
-### Embeddings
-`fill_roberta_embeddings` writes Story/Risks embeddings into `story_roberta_embedding_{{i}}` and `risk_roberta_embedding_{{i}}` columns **if** they exist among `clf_features`.
-
----
-
-## Execution Flow
-
-1. **Logging & seeds**: Logging to console and `kickstarter_ai.log`, seeds set for reproducibility.
-2. **Model loading**: Paraphraser, sentence embedder, classifier, feature list, KeyBERT, tokenizer.
-3. **Health check** (best-effort): Tries embedding, a dummy prediction, memory stats, GPU info.
-4. **Base DF**: Create aligned DataFrame and fill embeddings from original story/risks.
-5. **Base prediction**: `predict_success_probability` on the original text.
-6. **Quick suggestions**: Three preset sampling configs → paraphrase → filter by coherence → predict → rank.
-7. **(Optional) Optuna**: Sweeps hyperparameters; keeps best paraphrase that passes coherence threshold.
-
----
-
-## Models Loaded
-
-- **Paraphraser**: `humarin/chatgpt_paraphraser_on_T5_base`
-- **Embedder**: `sentence-transformers/roberta-base-nli-mean-tokens` (768-d)
-- **Classifier**: XGBoost (loaded via `joblib`) using `{{features}}.json` column list
-
-Hardware autodetection selects **CUDA** if available; otherwise CPU.
-
----
-
-## Output Walkthrough (Your Run)
-
-Below is a summary of the key events extracted from your console log:
-
-### 1) Dependency / Health
-- `psutil` missing → health report warns but continues.
-- Health check initially failed due to function order: `predict_success_probability` not yet defined when `health_check()` ran. **Outcome**: printed a warning but the rest of the pipeline executed.
-
-### 2) Model Loading
-- All models loaded in ~8 seconds on CPU.
-- Feature columns: **1,583** expected columns.
-
-### 3) Base Prediction
-- Original story success probability: **12.16%** (visual bar rendered).
-
-### 4) Quick Suggestions
-Three suggestions were generated; top candidate reached **14.42%**, with coherence ≥ 0.60.
-
-### 5) Optuna Optimization (10 trials)
-- Best trial achieved **19.60%** success probability with:
-  - `top_k=35`, `top_p=0.9002`, `temperature=1.2399`
-- Coherence check applied; output included a new paraphrase and theme tags.
-- Explanations clarify trade-offs for `top_k`, `top_p`, `temperature`.
-
-> **Interpretation**: The best paraphrase improved predicted success by **+7.44 pp** over the original (12.16% → 19.60%).
-
----
-
-## Common Issues & Debugging
-
-1. **`Health check failed: name 'predict_success_probability' is not defined`**
-   - **Cause**: `health_check()` is called before the function is defined.
-   - **Fix**: Move the definition of `predict_success_probability` **above** `health_check()`, or wrap the health check in a `try/except` that defers prediction until the function is available.
-
-2. **Missing `psutil`**
-   - **Symptom**: Warning only; memory part of health report disabled.
-   - **Fix**: `pip install psutil` (optional).
-
-3. **NLTK `punkt` missing**
-   - **Symptom**: Errors in sentence tokenization.
-   - **Fix**: `python -c "import nltk; nltk.download('punkt')"`
-
-4. **Feature mismatch**
-   - **Symptom**: `KeyError` or shape mismatch during prediction.
-   - **Fix**: Ensure `features_path` JSON aligns exactly with the trained model; `build_base_dataframe` adds missing columns but **cannot** reconcile semantic mismatches.
-
-5. **GPU memory errors**
-   - **Fix**: Lower batch size in `_embed_text_chunks` (e.g., `batch_size=8`), or run on CPU.
-
-6. **Slow paraphrase generation**
-   - **Fix**: Reduce `num_return`, shorten `max_new_tokens`, or skip Optuna for quick runs.
-
----
-
-## Quality Review & Improvements
-
-### 1) Function & Module Ordering
-- **Issue**: `health_check()` references `predict_success_probability` before it’s defined.
-- **Action**: Move `predict_success_probability` **above** `health_check`, or inject a guarded stub during early initialization.
-
-### 2) Naming & Consistency
-- Keep consistent prefixes for embedding columns: `story_roberta_embedding_{{i}}`, `risk_roberta_embedding_{{i}}` (already consistent).
-- Consider centralizing **all** magic numbers (512, 64, 16, 0.60) in `Config` (some are already there—complete the move).
-
-### 3) Error Handling & Validation
-- Add explicit checks in `fill_roberta_embeddings` to **verify presence** of expected embedding columns and warn once if missing.
-- In `generate_paraphrases`, you call `model.generate` and then **ignore** its outputs by calling `paraphrase_long_text` unconditionally. Prefer one code path:
-  - **Option A**: For **long** texts, **only** use `paraphrase_long_text` (chunked).  
-  - **Option B**: If `len(tokens) <= threshold`, use the simple path; else use chunked path.
-- Add timeouts to Optuna trials (e.g., `RDBSampler` + `timeout`) to prevent runaway trials.
-
-### 4) Performance
-- Cache sentence embeddings in `multi_sentence_coherence_score` to avoid recomputing for the same sentences across candidates.
-- Reuse `df_template` more aggressively and only overwrite embedding columns to avoid DataFrame allocations.
-- Consider using **FP16** for embedding on GPU to reduce memory and increase throughput (`SentenceTransformer` supports `torch_dtype=torch.float16` on CUDA).
-
-### 5) Reproducibility
-- You set seeds; also pin versions in `requirements.txt` and record `git` commit SHA and config snapshot at runtime in the logs.
-
-### 6) Testing
-- Add minimal tests:
-  - Tokens → chunking (edge cases: very long single sentence, zero-length, extreme stride)
-  - Pooling correctness (weights sum to 1)
-  - Feature alignment and prediction shape
-  - Paraphrase coherence gating behavior
-
-### 7) CLI / API Structure
-- Wrap main steps into a `main()`; expose CLI flags:
-  - `--quick-only`, `--optuna-trials`, `--coherence-threshold`, `--num-return`.
-- Return machine-readable JSON with the best candidate, probability, and parameters for downstream tooling.
-
-### 8) Logging
-- Avoid duplicated handlers on repeated runs by checking `logger.handlers` before adding.
-- Use `logger.debug` for verbose traces and condition on `CONFIG.enable_logging`/`log_level`.
-
----
-
-## Project Organization
-
-Suggested structure:
-```
-project/
-├─ src/
-│  ├─ config.py
-│  ├─ models.py               # load_models(), Models dataclass
-│  ├─ embeddings.py           # tokenize/chunk/pool utilities
-│  ├─ paraphrase.py           # paraphrase_long_text(), generate_paraphrases()
-│  ├─ features.py             # build_base_dataframe(), fill_roberta_embeddings()
-│  ├─ predict.py              # predict_success_probability()
-│  ├─ optimize.py             # get_quick_suggestions(), optimize_paraphrase_optuna()
-│  └─ health.py               # health_check()
-├─ runs/                      # trained models + feature JSONs
-├─ notebooks/                 # experiments
-├─ tests/                     # unit tests (pytest)
-├─ logs/
-│  └─ kickstarter_ai.log
-├─ README.md
-└─ requirements.txt
+{
+    "goal": 131421,
+    "rewardscount": 6, #optional
+    "projectFAQsCount": 8, #optional
+    "project_length_days": 30, #optional
+    "preparation_days": 5, #optional
+    "category_Web_Development": 1, #optional
+    "story": (
+        "Innovative Device is an ambitious project aimed at revolutionizing the Gadgets industry. While the concept behind Innovative Device was met with enthusiasm, we faced significant challenges in securing the necessary funding and resources. The journey has been filled with obstacles, ranging from supply chain issues to unexpected technical difficulties. Despite our best efforts, these setbacks delayed our timeline and affected our ability to bring Innovative Device to market at the scale we envisioned. Our hope was to introduce Innovative Device to the Gadgets market and make a meaningful impact. Although this campaign did not reach its goal, the feedback and support from our community have been invaluable. We will continue exploring alternative funding options and look forward to relaunching Innovative Device in the future with a stronger foundation."
+    ),
+    "risks": (
+        "Launching Innovative Device in the field of Gadgets comes with its own set of challenges. One of the biggest concerns is ensuring that Innovative Device integrates seamlessly with existing Gadgets solutions. Compatibility issues may arise, requiring extensive testing and refinements before mass production. Additionally, sourcing high-quality components for Gadgets-specific hardware can be time-consuming and costly. Security is another major factor. Innovative Device will need to maintain strict data protection standards to ensure privacy and prevent cyber threats. The regulatory landscape for Gadgets is evolving, and ensuring compliance with industry standards is crucial for Innovative Device to be legally distributed in multiple markets. Our team is prepared to address these risks by implementing a robust quality control process, working closely with industry experts, and securing partnerships with reliable manufacturers to ensure a smooth launch."
+    ),
+}
 ```
 
-Add a `Makefile` with shortcuts:
-```makefile
-quick:
-	python -m src.main --quick-only
+The output:
 
-optuna:
-	python -m src.main --optuna-trials=25
+🎯 ORIGINAL STORY:
+Innovative Device is an ambitious project aimed at revolutionizing the Gadgets industry. While the
+concept behind Innovative Device was met with enthusiasm, we faced significant challenges in
+securing the necessary funding and resources. The journey has been filled with obstacles, ranging
+from supply chain issues to unexpected technical difficulties. Despite our best efforts, these
+setbacks delayed our timeline and affected our ability to bring Innovative Device to market at the
+scale we envisioned. Our hope was to introduce Innovative Device to the Gadgets market and make a
+meaningful impact. Although this campaign did not reach its goal, the feedback and support from our
+community have been invaluable. We will continue exploring alternative funding options and look
+forward to relaunching Innovative Device in the future with a stronger foundation.
+📖 Story-only Probability: 9.43%
+
+⚠️ ORIGINAL RISKS:
+Launching Innovative Device in the field of Gadgets comes with its own set of challenges. One of the
+biggest concerns is ensuring that Innovative Device integrates seamlessly with existing Gadgets
+solutions. Compatibility issues may arise, requiring extensive testing and refinements before mass
+production. Additionally, sourcing high-quality components for Gadgets-specific hardware can be
+time-consuming and costly. Security is another major factor. Innovative Device will need to maintain
+strict data protection standards to ensure privacy and prevent cyber threats. The regulatory
+landscape for Gadgets is evolving, and ensuring compliance with industry standards is crucial for
+Innovative Device to be legally distributed in multiple markets. Our team is prepared to address
+these risks by implementing a robust quality control process, working closely with industry experts,
+and securing partnerships with reliable manufacturers to ensure a smooth launch.
+⚠️ Risks-only Probability: 17.21%
+
+🎯 Combined Probability: 12.16%
+📈 Visual Score: 🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (12.16%)
+
+
+⚡ Paraphrase Suggestions — STORY first, then RISKS:
+🔹 Suggestion #1 [STORY]
+🧠 Theme: revolutionize gadgets industry / device revolutionize gadgets / required funding infrastructure
+The goal of Innovative Device is to revolutionize the Gadgets industry through innovation. Despite
+this initial enthusiasm, we encountered significant obstacles in acquiring the required funding and
+infrastructure. These obstacles, such as supply chain problems and technical problems, caused us to
+delay the implementation of Innovative Device to the market. Despite this, we aim to expand our
+range of products in a significant way by focusing solely on the Gadgets industry. The overwhelming
+response from CSQA conferences and workshops, as well as individuals, indicates our commitment to
+providing appropriate funding.
+✅ Success Probability: 14.18%
+📈 Visual Score: 🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (14.18%)
+🧪 Params: top_k=80, top_p=0.95, temperature=1.2
+🧠 Coherence: 0.72 ✅ Strong
+🔹 Suggestion #2 [STORY]
+🧠 Theme: ambitious project seeks / difficulties hindered efforts / challenges obtaining necessary
+Innovative Device is an ambitious project that seeks to revolutionize the Gadgets industry, but it
+has been a struggle. We encountered numerous challenges in obtaining the necessary funding and
+resources, such as supply chain problems and technical difficulties. These difficulties hindered our
+efforts to achieve the scale of our vision, which we hope will be achieved in the Gadgets market.
+Despite this disappointment, we remain hopeful and will continue to seek more funding from community
+members.
+✅ Success Probability: 13.03%
+📈 Visual Score: 🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (13.03%)
+🧪 Params: top_k=60, top_p=0.88, temperature=0.9
+🧠 Coherence: 0.71 ✅ Strong
+🔹 Suggestion #3 [STORY]
+🧠 Theme: desire revolutionize gadgets / revolutionize gadgets industry / strong desire revolutionize
+Our initiative, Innovative Device, was born out of a strong desire to revolutionize the Gadgets
+industry. Despite a challenging launch, we were met with numerous obstacles, including poor supply
+chain issues and unexpected technical issues. We resorted to pitching Innovative Device to other
+companies, but these difficulties only added fuel to our fire. Despite this disappointment, we
+believe that we must not hold back from pursuing funding or restarting our project in a similar way.
+The feedback we have received has since been invaluable in promoting the idea further sharing,
+despite ongoing, in response to an overall
+✅ Success Probability: 6.63%
+📈 Visual Score: 🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (6.63%)
+🧪 Params: top_k=40, top_p=0.92, temperature=1.0
+🧠 Coherence: 0.72 ✅ Strong
+🔹 Suggestion #1 [RISKS]
+🧠 Theme: expensive testing security / consuming expensive testing / expensive testing
+We understand the challenges that come with launching Innovative Device in the market of Gadgets,
+including the need to integrate the product into existing Gadgets solutions through years of
+compatability and time-consuming and expensive testing; security is also a top priority, with even
+the latest hardware having to be made in a time-consuming and low-quality process. Lastly, we aim to
+secure facilities in a strong and reliable manner, and to ensure that innovative Device is ready for
+market success through rigorous quality control of its existing components, including the ideally,
+dependable services and dependable tools
+✅ Success Probability: 12.07%
+📈 Visual Score: 🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (12.07%)
+🧪 Params: top_k=80, top_p=0.95, temperature=1.2
+🧠 Coherence: 0.77 ✅ Strong
+🔹 Suggestion #2 [RISKS]
+🧠 Theme: solutions require time / require time effort / hardware costly time
+When launching Innovative Device in the Gadgets market, we face multiple challenges. Specifically,
+we focus on ensuring that our devices can integrate seamlessly with existing Gadgets solutions,
+which may require time and effort to refine. Additionally, we recognize that sourcing top-notch
+components for Gadgets-specific hardware can be a costly and time-consuming undertaking, and will
+require significant stumbling blocks due to the need to uphold strict data protection standards.
+Ultimately, we aim to ensure that our devices adhere to industry standards that we expect reliable
+quality.
+✅ Success Probability: 11.00%
+📈 Visual Score: 🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (11.00%)
+🧪 Params: top_k=40, top_p=0.92, temperature=1.0
+🧠 Coherence: 0.74 ✅ Strong
+🔹 Suggestion #3 [RISKS]
+🧠 Theme: hardware time consuming / expensive endeavor security / time consuming expensive
+Our team is well-equipped to handle the challenges and pitfalls that come with launching Innovative
+Device within the open world of Gadgets. One of the primary concerns is that it may not be
+compatible with existing Gadgets solutions, leading to time and expense on both sides. Furthermore,
+sourcing high-quality components for Gadgets-specific hardware can be a time-consuming and expensive
+endeavor. Moreover, security needs to be taken into account, and a quality product must comply with
+industry standards in order to be sold in multiple markets.
+✅ Success Probability: 10.88%
+📈 Visual Score: 🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (10.88%)
+🧪 Params: top_k=60, top_p=0.88, temperature=0.9
+🧠 Coherence: 0.61 ✅ Strong
+
+🔷 Best combo is story2 + risk1 = 13.92%
+📈 Visual Score: 🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (13.92%)
+
+🔧 Run optimization with Optuna for STORY & RISKS? (y/n): y
+[I 2025-08-12 15:45:21,493] A new study created in memory with name: no-name-2c57d340-967c-4174-958c-b1af20a963ab
+🔄 STORY Trial 1/10 …[I 2025-08-12 15:45:25,364] Trial 0 finished with value: 0.14697660505771637 and parameters: {'top_k': 54, 'top_p': 0.8706289163800806, 'temperature': 0.9946885636460518}. Best is trial 0 with value: 0.14697660505771637.
+🔄 STORY Trial 2/10 …[I 2025-08-12 15:45:30,029] Trial 1 finished with value: 0.12732796370983124 and parameters: {'top_k': 80, 'top_p': 0.8917300702676217, 'temperature': 1.162874974418276}. Best is trial 0 with value: 0.14697660505771637.
+...
+...
+...
+✅ Optimization completed for risks
+
+🔹 OPTUNA RESULT — STORY:
+🧠 Theme: revolutionize gadgets industry / seeks revolutionize gadgets / bring market larger
+Innovative Device is a project that seeks to revolutionize the Gadgets industry. Despite our
+enthusiasm for the idea, we encountered significant obstacles in obtaining the necessary funding and
+resources. These challenges, along with supply chain issues, have significantly impacted our
+timeline as we strive to bring it to market on a larger scale. Despite this setback, we remain
+committed to building on our previous success and gratefully accepting the feedback and support we
+have received from our community.
+✅ Success Probability: 18.78%
+🧪 Params: {'top_k': 112, 'top_p': 0.9293992888111543, 'temperature': 0.8206255834472103}
+🧠 Notes:
+• Very high top-k => creative but unstable.
+• Medium top-p is balanced.
+• Low temperature => predictable phrasing; high => surprising phrasing.
+
+🔹 OPTUNA RESULT — RISKS:
+🧠 Theme: challenges include time / extensive testing refinement / involve extensive testing
+The process of launching Innovative Device in the Gadgets industry presents several challenges, one
+of which is integrating seamlessly with existing Gadgets solutions. This may involve extensive
+testing and refinement, while other challenges include time and money required to source high-
+quality components for Gadgets-specific hardware. Security is also a top priority, and it will
+require adherence to strict data protection standards to prevent cyber threats. To ensure a
+successful launch, we will work with reliable manufacturers to ensure seamless integration across
+all devices.
+✅ Success Probability: 14.58%
+🧪 Params: {'top_k': 150, 'top_p': 0.8705642120335156, 'temperature': 0.8056614629169244}
+🧠 Notes:
+• Very high top-k => creative but unstable.
+• Low top-p narrows choice distribution (stable).
+• Low temperature => predictable phrasing; high => surprising phrasing.
+
+🔷 COMBINED (apply STORY+RISKS best):
+✅ Success Probability: 21.16%
+📈 Visual Score: 🟩🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜ (21.16%)
+
+
+
+
 ```
 
-Track experiments with a simple CSV or `mlflow` (optional).
 
----
-
-## FAQ
-
-**Q: Why coherence threshold 0.60?**  
-A: Empirically balances novelty vs. semantic drift; adjust per dataset using validation.
-
-**Q: Can I swap the embedder?**  
-A: Yes, but keep `EMBED_DIM` and feature columns in sync. Re-train or re-extract embeddings if the space changes.
-
-**Q: Is KeyBERT mandatory?**  
-A: No. It’s for quick interpretability; you can disable if speed is critical.
-
-**Q: Can I optimize the Risks section too?**  
-A: Yes—duplicate the flow for `risks` and merge both embeddings into the feature vector before prediction.
-
----
-
-## Changelog
-
-- **2025-08-10**: Initial README generated from a working run; documents pipeline, output, and known issues (health-check order).
-
----
-
-## Next Steps (Actionable)
-
-- [ ] Reorder definitions so `health_check` does not reference undefined functions.
-- [ ] Unify paraphrase generation path (short vs. long text) to avoid duplicate work.
-- [ ] Cache sentence embeddings in coherence scoring.
-- [ ] Add CLI flags and JSON output for automation.
-- [ ] Create unit tests for chunking, pooling, feature alignment, and gating.
-- [ ] Consider experiment tracking (optuna storage, mlflow).
