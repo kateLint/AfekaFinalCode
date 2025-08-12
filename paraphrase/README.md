@@ -1,7 +1,5 @@
 # Kickstarter Paraphrasing & Scoring Pipeline
 
-**Last updated:** 2025-08-10 10:19:05
-
 This project evaluates and optimizes Kickstarter project texts (Story + Risks) by:
 - Generating paraphrases with a T5-based model
 - Embedding long texts using a RoBERTa sentence transformer with overlap-aware chunking
