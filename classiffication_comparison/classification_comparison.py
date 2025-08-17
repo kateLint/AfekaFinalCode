@@ -400,10 +400,21 @@ def print_formatted_results(results_list, output_file=None):
     output_lines = []; headers = ["Model Config", "Classifier", "F1 (w)", "Recall (w)", "Prec (w)", "Specificity", "AUC", "Fit Time(s)", "WEIGHT K", "Pred Success", "Pred Failed", "Best Params / Status"]
     output_lines.append("| " + " | ".join(headers) + " |"); output_lines.append("|" + "---|"*len(headers))
     results_list.sort(key=lambda x: x.get('F1 Weighted', -float('inf')) if pd.notna(x.get('F1 Weighted')) else -float('inf'), reverse=True)
+
+    def fmt_mean_std(mean_val, std_val, digits=4):
+        if pd.isna(mean_val):
+            return "N/A"
+        if pd.isna(std_val):
+            return f"{mean_val:.{digits}f}"
+        return f"{mean_val:.{digits}f} ± {std_val:.{digits}f}"
+
     for result in results_list:
-        f1_w = f"{result.get('F1 Weighted', np.nan):.4f}"; rec_w = f"{result.get('Recall Weighted', np.nan):.4f}"
-        prec_w = f"{result.get('Precision Weighted', np.nan):.4f}"; spec = f"{result.get('Specificity', np.nan):.4f}"
-        auc = f"{result.get('AUC', np.nan):.4f}"; fit_time = f"{result.get('Mean Fit Time', np.nan):.2f}"
+        f1_w = fmt_mean_std(result.get('F1 Weighted', np.nan), result.get('F1 Weighted Std', np.nan))
+        rec_w = fmt_mean_std(result.get('Recall Weighted', np.nan), result.get('Recall Weighted Std', np.nan))
+        prec_w = fmt_mean_std(result.get('Precision Weighted', np.nan), result.get('Precision Weighted Std', np.nan))
+        spec  = fmt_mean_std(result.get('Specificity', np.nan), result.get('Specificity Std', np.nan))
+        auc   = fmt_mean_std(result.get('AUC', np.nan), result.get('AUC Std', np.nan))
+        fit_time = f"{result.get('Mean Fit Time', np.nan):.2f}"
         smote_k = str(result.get('WEIGHT K', 'N/A'))
         pred_success = str(result.get('Predicted Successful', 'N/A'))
         pred_failed = str(result.get('Predicted Failed', 'N/A'))
@@ -641,32 +652,83 @@ def main_classification():
                 if not X_features.empty and original_feature_names:
                     print("Running DummyClassifier baseline...")
                     dummy = DummyClassifier(strategy='most_frequent', random_state=42)
-                    dummy_scores = cross_val_score(dummy, X_features, y_original_df, scoring='f1_weighted', cv=cv_strategy_outer, n_jobs=-1)
-                    dummy_f1_mean = dummy_scores.mean()
-                    dummy_f1_std = dummy_scores.std()
-                    print(f"DummyClassifier F1 Weighted (mean ± std): {dummy_f1_mean:.4f} ± {dummy_f1_std:.4f}")
-                    
-                    # Get dummy predictions for counting
-                    dummy_predictions = cross_val_predict(dummy, X_features, y_original_df, cv=cv_strategy_outer, n_jobs=-1)
-                    dummy_pred_successful = np.sum(dummy_predictions == 1)
-                    dummy_pred_failed = np.sum(dummy_predictions == 0)
-                    
-                    all_results.append({
-                        'Model Config': f"{config_name}_Dummy",
-                        'Classifier': 'DummyClassifier',
-                        'F1 Weighted': dummy_f1_mean,
-                        'F1 Weighted Std': dummy_f1_std,
-                        'Recall Weighted': np.nan,
-                        'Precision Weighted': np.nan,
-                        'Specificity': np.nan,
-                        'AUC': np.nan,
-                        'Mean Fit Time': np.nan,
-                        'WEIGHT K': 'N/A',
-                        'Predicted Successful': dummy_pred_successful,
-                        'Predicted Failed': dummy_pred_failed,
-                        'Best Params': 'strategy=most_frequent',
-                        'Optimization Status': 'Baseline'
-                    })
+
+                    # ננסה לא רק F1 אלא גם שאר המדדים באופן עקבי
+                    dummy_scoring = {
+                        'f1_weighted': 'f1_weighted',
+                        'recall_weighted': 'recall_weighted',
+                        'precision_weighted': 'precision_weighted',
+                        'specificity': specificity_scorer,
+                        'roc_auc': 'roc_auc'
+                    }
+
+                    try:
+                        dummy_cv = cross_validate(
+                            dummy, X_features, y_original_df,
+                            scoring=dummy_scoring, cv=cv_strategy_outer,
+                            return_train_score=False, n_jobs=-1, error_score='raise'
+                        )
+
+                        # סיכום cv (mean+std לכל המדדים)
+                        dummy_summary = summarize_cv_results(dummy_cv, ddof=1)
+
+                        # חיזוי לצורך ספירות
+                        dummy_predictions = cross_val_predict(dummy, X_features, y_original_df, cv=cv_strategy_outer, n_jobs=-1)
+                        dummy_pred_successful = int(np.sum(dummy_predictions == 1))
+                        dummy_pred_failed = int(np.sum(dummy_predictions == 0))
+
+                        all_results.append({
+                            'Model Config': f"{config_name}_Dummy",
+                            'Classifier': 'DummyClassifier',
+                            'F1 Weighted': dummy_summary['F1 Weighted'],
+                            'F1 Weighted Std': dummy_summary['F1 Weighted Std'],
+                            'Recall Weighted': dummy_summary['Recall Weighted'],
+                            'Recall Weighted Std': dummy_summary['Recall Weighted Std'],
+                            'Precision Weighted': dummy_summary['Precision Weighted'],
+                            'Precision Weighted Std': dummy_summary['Precision Weighted Std'],
+                            'Specificity': dummy_summary['Specificity'],
+                            'Specificity Std': dummy_summary['Specificity Std'],
+                            'AUC': dummy_summary['AUC'],
+                            'AUC Std': dummy_summary['AUC Std'],
+                            'Mean Fit Time': dummy_summary['Mean Fit Time'],
+                            'WEIGHT K': 'N/A',
+                            'Predicted Successful': dummy_pred_successful,
+                            'Predicted Failed': dummy_pred_failed,
+                            'Best Params': 'strategy=most_frequent',
+                            'Optimization Status': 'Baseline'
+                        })
+
+                    except Exception as e:
+                        # אם AUC יפיל ריצה (למשל חיזוי קבוע 0/1), נרד חזרה ל־F1 בלבד כדי שתהיה לנו רפרנס
+                        print(f"Dummy full-metrics cross_validate failed: {e}. Falling back to F1-only.")
+                        dummy_scores = cross_val_score(dummy, X_features, y_original_df, scoring='f1_weighted', cv=cv_strategy_outer, n_jobs=-1)
+                        dummy_f1_mean = float(np.mean(dummy_scores))
+                        dummy_f1_std = float(np.std(dummy_scores, ddof=1))
+
+                        dummy_predictions = cross_val_predict(dummy, X_features, y_original_df, cv=cv_strategy_outer, n_jobs=-1)
+                        dummy_pred_successful = int(np.sum(dummy_predictions == 1))
+                        dummy_pred_failed = int(np.sum(dummy_predictions == 0))
+
+                        all_results.append({
+                            'Model Config': f"{config_name}_Dummy",
+                            'Classifier': 'DummyClassifier',
+                            'F1 Weighted': dummy_f1_mean,
+                            'F1 Weighted Std': dummy_f1_std,
+                            'Recall Weighted': np.nan,
+                            'Recall Weighted Std': np.nan,
+                            'Precision Weighted': np.nan,
+                            'Precision Weighted Std': np.nan,
+                            'Specificity': np.nan,
+                            'Specificity Std': np.nan,
+                            'AUC': np.nan,
+                            'AUC Std': np.nan,
+                            'Mean Fit Time': np.nan,
+                            'WEIGHT K': 'N/A',
+                            'Predicted Successful': dummy_pred_successful,
+                            'Predicted Failed': dummy_pred_failed,
+                            'Best Params': 'strategy=most_frequent',
+                            'Optimization Status': 'Baseline'
+                        })
                 else:
                     print("Skipping DummyClassifier: No features available")
 
@@ -821,23 +883,29 @@ def main_classification():
                     pred_failed = np.sum(cv_predictions == 0)
                     
                     print(f"  Prediction counts: Successful={pred_successful}, Failed={pred_failed}")
-                    
+                    summary_stats = summarize_cv_results(cv_results, ddof=1)
+
                     result_entry = {
                         'Model Config': config_name,
                         'Classifier': model_key,
-                        'F1 Weighted': np.mean(cv_results['test_f1_weighted']),
-                        'F1 Weighted Std': np.std(cv_results['test_f1_weighted']),
-                        'Recall Weighted': np.mean(cv_results['test_recall_weighted']),
-                        'Precision Weighted': np.mean(cv_results['test_precision_weighted']),
-                        'Specificity': np.mean(cv_results['test_specificity']),
-                        'AUC': np.mean(cv_results['test_roc_auc']),
-                        'Mean Fit Time': np.mean(cv_results['fit_time']),
+                        'F1 Weighted': summary_stats['F1 Weighted'],
+                        'F1 Weighted Std': summary_stats['F1 Weighted Std'],
+                        'Recall Weighted': summary_stats['Recall Weighted'],
+                        'Recall Weighted Std': summary_stats['Recall Weighted Std'],
+                        'Precision Weighted': summary_stats['Precision Weighted'],
+                        'Precision Weighted Std': summary_stats['Precision Weighted Std'],
+                        'Specificity': summary_stats['Specificity'],
+                        'Specificity Std': summary_stats['Specificity Std'],
+                        'AUC': summary_stats['AUC'],
+                        'AUC Std': summary_stats['AUC Std'],
+                        'Mean Fit Time': summary_stats['Mean Fit Time'],
                         'WEIGHT K': smote_k_used,
                         'Predicted Successful': pred_successful,
                         'Predicted Failed': pred_failed,
                         'Best Params': best_params,
                         'Optimization Status': optimization_status
                     }
+
                     all_results.append(result_entry)
                     print(f"  --- Final CV Results ({outer_cv_folds}-Fold) ---")
                     for metric in scoring_metrics:
@@ -1046,6 +1114,50 @@ def main_classification():
         print("\nNo feature importance data generated.")
     
     print(f"\nClassification analysis complete! Results in: {os.path.abspath(output_dir)}")
+# =========================
+# CV Summary Helper
+# =========================
+def summarize_cv_results(cv_results, ddof=1):
+    """
+    Summarize cross_validate results dict into mean + std for all requested metrics.
+    Uses sample std (ddof=1) by default.
+    Returns a dict with keys:
+      'F1 Weighted', 'F1 Weighted Std', 'Recall Weighted', 'Recall Weighted Std',
+      'Precision Weighted', 'Precision Weighted Std', 'Specificity', 'Specificity Std',
+      'AUC', 'AUC Std'
+    """
+    def mean_std(arr, use_ddof=ddof):
+        arr = np.array(arr, dtype=float)
+        # guard against NaNs or len<2
+        m = np.nanmean(arr) if arr.size else np.nan
+        s = np.nanstd(arr, ddof=use_ddof) if arr.size > 1 else 0.0
+        return m, s
+
+    out = {}
+
+    pairs = [
+        ('test_f1_weighted',       'F1 Weighted',        'F1 Weighted Std'),
+        ('test_recall_weighted',   'Recall Weighted',    'Recall Weighted Std'),
+        ('test_precision_weighted','Precision Weighted', 'Precision Weighted Std'),
+        ('test_specificity',       'Specificity',        'Specificity Std'),
+        ('test_roc_auc',           'AUC',                'AUC Std')
+    ]
+
+    for key, mean_name, std_name in pairs:
+        if key in cv_results:
+            m, s = mean_std(cv_results[key])
+        else:
+            m, s = np.nan, np.nan
+        out[mean_name] = m
+        out[std_name]  = s
+
+    # mean fit time (אין צורך ב־std כאן, אבל אפשר להוסיף אם תרצי)
+    if 'fit_time' in cv_results:
+        out['Mean Fit Time'] = float(np.nanmean(cv_results['fit_time']))
+    else:
+        out['Mean Fit Time'] = np.nan
+
+    return out
 
 if __name__ == "__main__":
     script_start_time = time.time()
