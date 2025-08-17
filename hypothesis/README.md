@@ -4,132 +4,68 @@ This repository contains a suite of Python scripts developed to analyze Kickstar
 
 ## 📁 File Overview
 
-| File          | Purpose                                                                                                                                       |
-|---------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `h1.py`       | **Sentiment Hypothesis Testing** – Runs sentiment analysis using VADER on `story`, `risks`, and `faqs`, with statistical testing and logistic regression. |
-| `h2.py`       | **Topic Modeling (BERTopic)** – Trains BERTopic on cleaned `story` texts, reduces topics, assigns labels, performs logistic regression, and tests H6 hypothesis using manually defined themes. |
-| `h3_story.py` | **Readability Analysis (Story)** – Extracts and evaluates readability and lexical metrics from the "Story Analysis" section.                   |
-| `h3_risks.py` | **Readability Analysis (Risks)** – Similar to above but for "Risks and Challenges", with logistic regression and statistical testing.          |
-| `h4.py`       | **Update Behavior by Category** – Explores how update count varies across categories (excluding Technology) and its relationship to success rate. |
-| `h5.py`       | **Passive Voice Analysis** – Detects and quantifies passive voice usage in the `story` and `risks-and-challenges` fields; outputs sentence-level counts and ratios to CSV. |
-
-
-## 🚀 How to Use
-
-Each script is **independent**, but assumes relevant JSON input files. Here’s how to run and interpret them:
+| File        | Purpose                                                                 |
+|-------------|-------------------------------------------------------------------------|
+| `h1-h3.py`  | Logistic regression + Welch t-tests to evaluate the impact of project engagement, readability, and sentiment on success. |
+| `h4.py`     | Topic modeling and keyword detection (H4), assessing thematic framing (e.g., innovation, community, transparency). |
+| `h5.py`     | Exploratory data analysis of project category impact, update frequency, and success correlation (H5). |
+| `h6.py`     | Passive voice detection and sentence structure analysis of project text (H6). |
 
 ---
 
-### 🧪 `h1.py` – Sentiment-Based Hypotheses
+## 📊 Hypotheses & Corresponding Scripts
 
-- **Input**: `all_good_projects_without_embeddings.json`
-- **What it does**:
-  - Extracts VADER sentiment for: `story`, `risks-and-challenges`, and `faqs`.
-  - Performs t-tests, correlation, and logistic regression.
-  - Visualizes with boxplots and KDEs.
-
-**Usage**:
-```bash
-python h1.py
-```
+| Hypothesis | Description | Script |
+|------------|-------------|--------|
+| **H1**     | Higher project engagement (e.g., updates, comments) correlates with success. | `h1-h3.py` |
+| **H2**     | Higher readability in project text correlates with success. | `h1-h3.py` |
+| **H3**     | More positive or clearer sentiment correlates with success. | `h1-h3.py` |
+| **H4**     | Thematic framing (innovation, community, transparency) affects success probability. | `h4.py` |
+| **H5**     | Categories with more updates show higher success rates. | `h5.py` |
+| **H6**     | Lower passive voice usage and shorter sentences improve success. | `h6.py` |
 
 ---
 
-### 🧠 `h2.py` – Topic Modeling with BERTopic
+## 🧪 Script Details
 
-- **Input**: `all_good_projects_without_embeddings.json`
-- **What it does**:
-  - Trains BERTopic on English-only stories.
-  - Reduces to 50 topics, extracts coefficients.
-  - Maps topics to themes (e.g., Innovation, Community).
-  - Tests logistic regression (H6) and chi-square.
+### `h1-h3.py`: Logistic Regression + t-tests
+- Loads Kickstarter JSON/CSV/JSONL data.
+- Harmonizes nested readability, sentiment, and engagement features.
+- Computes:
+  - Welch t-tests by feature group.
+  - Logistic regression with standardized coefficients, odds ratios, Wald z-tests.
+  - VIF for multicollinearity diagnostics.
+  - 5-fold stratified CV report for predictive sanity check.
+- Output: `.csv` files and a `README.txt` summary under `./outputs/`.
 
-**Usage**:
-```bash
-python h2.py
-```
+### `h4.py`: Topic Framing via Keywords
+- Defines keyword sets for:
+  - **Innovation** (e.g., "cutting-edge", "revolutionary")
+  - **Community** (e.g., "support", "together")
+  - **Transparency** (e.g., "plan", "tested", "honest")
+- Applies keyword search to cleaned `story` texts.
+- Computes logistic regression and chi-squared tests.
+- Prints summary stats and odds ratios.
 
-*Dependencies*: `bertopic`, `tabulate`, `scikit-learn`, `langdetect`
+### `h5.py`: Category-Based Update Analysis
+- Loads data and filters by project state.
+- Computes average number of updates and success rate per category (excluding Technology).
+- Visualizes:
+  - Barplots of average updates and success rates by category.
+  - Scatter plot of updates vs. success rate.
+  - Pearson correlation between update frequency and success.
 
----
-
-### 📖 `h3_story.py` – Readability (Story)
-
-- **Input**: `all_good_projects_without_embeddings.json`
-- **What it does**:
-  - Extracts readability scores and lexical diversity from `Story Analysis`.
-  - Runs logistic regression and t-tests.
-  - Plots boxplots per readability metric.
-
-**Usage**:
-```bash
-python h3_story.py
-```
-
----
-
-### ⚠️ `h3_risks.py` – Readability (Risks)
-
-- **Input**: `all_good_projects_without_embeddings.json`
-- **What it does**:
-  - Same flow as `h3_story.py`, but for `Risks and Challenges Analysis`.
-
-**Usage**:
-```bash
-python h3_risks.py
-```
+### `h6.py`: Passive Voice Analysis
+- Uses spaCy to detect passive constructions in:
+  - `story`
+  - `risks-and-challenges`
+- Extracts:
+  - Passive count, ratio, and average sentence length.
+  - Examples of passive constructions.
+- Outputs:
+  - CSV with added metrics.
+  - Visualizations (histograms, boxplots, scatter plots).
+  - Text file with example sentences.
+  - Summary report with statistics and correlations.
 
 ---
-
-### 📊 `h4.py` – Category-Wise Analysis
-
-- **Input**: `all_good_projects_without_embeddings.json`
-- **What it does**:
-  - Calculates average update count and success rate per category (excluding Technology).
-  - Visualizes: Barplots, scatter plot, correlation.
-
-**Usage**:
-```bash
-python h4.py
-```
-
----
-
-### 📝 `h5.py` – Passive Voice Analysis
-
-- **Input**: `all_good_projects_without_embeddings.json`
-- **What it does**:
-  - Analyzes each sentence in the `story` and `risks-and-challenges` fields for passive voice using spaCy.
-  - Calculates the count and ratio of passive sentences for each field.
-  - Appends these statistics to the dataset and saves as CSV.
-
-**Usage**:
-```bash
-python h5.py
-```
-
-*Dependencies*: `pandas`, `spacy`, `tqdm`  
-*Note: Downloads the `en_core_web_sm` spaCy model if not available.*
-
----
-
-## 🛠️ Installation Tips
-
-Make sure to install the required libraries:
-
-```bash
-pip install pandas numpy matplotlib seaborn scikit-learn statsmodels nltk bertopic tabulate langdetect spacy tqdm
-```
-
-Also, download VADER lexicon for `nltk` (needed by `h1.py`):
-
-```python
-import nltk
-nltk.download('vader_lexicon')
-```
-
-And for `h5.py`, ensure the spaCy English model is installed:
-
-```bash
-python -m spacy download en_core_web_sm
-```
