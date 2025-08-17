@@ -23,7 +23,7 @@ This repository contains a full-featured machine learning pipeline for predictin
     ```
 
 2. Place your Kickstarter dataset (`.json`) in the correct path.
-    > Example path used: `/Users/kerenlint/Projects/Afeka/models/all_good_projects_with_modernbert_embeddings_enhanced_with_miniLM12.json`
+    > Example path used: `/Users/kerenlint/Projects/Afeka/models/projects_with_short_stories_and_risks_cleaned_512_tokens.json`
 
 3. Run the pipeline:
     ```bash
@@ -87,27 +87,8 @@ Tracked metrics include:
 - Prediction counts (successful vs failed)
 - Fit time
 
----
-
-## 👩‍🔬 Research Context
-
-This project is part of a Master's thesis:
-
-> **Title**: *Crowdfunding Technology Projects: The Impact of Textual Characterization on Project Success*  
-> **Author**: Keren Lint  
-> **Institution**: Afeka College of Engineering, 2025
-
----
-
 ## ⚠️ Notes
 
 - Only structured and preprocessed JSON files are supported.
 - Excludes known leakage features (e.g., pledged amount, backers).
 - Default config: 5-fold outer CV, 5-fold tuning, 5 BayesSearch iterations.
-
----
-
-## 📜 License
-
-This codebase is for academic/research purposes.  
-Contact the author for reuse, citation, or collaboration.
