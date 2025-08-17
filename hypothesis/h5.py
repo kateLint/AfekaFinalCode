@@ -1,61 +1,72 @@
 import pandas as pd
-import spacy
-from tqdm import tqdm
-import os
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-try:
-    nlp = spacy.load("en_core_web_sm")
-except:
-    import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
-    nlp = spacy.load("en_core_web_sm")
+# Load data
+df = pd.read_json("/Users/kerenlint/Projects/Afeka/all_models/all_good_projects_without_embeddings.json")
 
-file_path = "/Users/kerenlint/Projects/Afeka/all_models/all_good_projects_without_embeddings.json"
-output_path = "/Users/kerenlint/Projects/Afeka/all_models/all_projects_with_passive_analysis.csv"
+# Filter valid states
+df = df[df["state"].isin(["successful", "failed"])].copy()
+df["success"] = (df["state"] == "successful").astype(int)
 
-if not os.path.exists(file_path):
-    raise FileNotFoundError(f"File not found at: {file_path}")
+# All category columns except 'Technology'
+category_cols = [
+    col for col in df.columns
+    if col.startswith("category_")
+    and df[col].dtype == bool
+    and col != "category_Technology"
+]
 
-df = pd.read_json(file_path, convert_dates=False)
+# Build summary per category
+results = []
 
-def is_passive(sentence):
-    doc = nlp(sentence)
-    for token in doc:
-        if token.dep_ == "nsubjpass" or (token.tag_ == "VBN" and token.head.dep_ == "auxpass"):
-            return True
-    return False
+for cat_col in category_cols:
+    sub = df[df[cat_col] == True]
+    if len(sub) < 10:
+        continue  # skip small categories
 
-def analyze_passive(text):
-    if not isinstance(text, str) or len(text.strip()) == 0:
-        return 0, 0
-    doc = nlp(text)
-    total = 0
-    passive = 0
-    for sent in doc.sents:
-        total += 1
-        if is_passive(sent.text):
-            passive += 1
-    return passive, total
+    category_name = cat_col.replace("category_", "")
+    avg_updates = sub["updateCount"].mean()
+    success_rate = sub["success"].mean()
+    total_projects = len(sub)
 
-def apply_passive_analysis(df, column_name):
-    if column_name not in df.columns:
-        print(f"Warning: Column '{column_name}' not found in dataset")
-        return df
-    
-    passive_counts = []
-    total_counts = []
-    for text in tqdm(df[column_name], desc=f"Analyzing {column_name} for passive voice"):
-        passive, total = analyze_passive(text)
-        passive_counts.append(passive)
-        total_counts.append(total)
-    
-    df[f"{column_name}_passive_sentences"] = passive_counts
-    df[f"{column_name}_total_sentences"] = total_counts
-    df[f"{column_name}_passive_ratio"] = df[f"{column_name}_passive_sentences"] / df[f"{column_name}_total_sentences"].replace(0, 1)
-    return df
+    results.append({
+        "category": category_name,
+        "avg_updates": avg_updates,
+        "success_rate": success_rate,
+        "num_projects": total_projects
+    })
 
-df = apply_passive_analysis(df, "story")
-df = apply_passive_analysis(df, "risks-and-challenges")
+results_df = pd.DataFrame(results).sort_values("avg_updates", ascending=False)
 
-df.to_csv(output_path, index=False)
-print(f"\n✅ Passive voice analysis completed and saved to:\n{output_path}")
+# === Visualizations ===
+plt.figure(figsize=(12, 6))
+sns.barplot(x="avg_updates", y="category", data=results_df, palette="Blues_d")
+plt.title("Average Updates per Project by Category")
+plt.xlabel("Average # of Updates")
+plt.ylabel("Category")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+sns.barplot(x="success_rate", y="category", data=results_df, palette="Greens_d")
+plt.title("Success Rate by Category")
+plt.xlabel("Success Rate")
+plt.ylabel("Category")
+plt.tight_layout()
+plt.show()
+
+# Scatter: Updates vs Success Rate
+plt.figure(figsize=(8, 6))
+sns.scatterplot(x="avg_updates", y="success_rate", hue="category", data=results_df, s=100)
+plt.title("Avg. Updates vs Success Rate")
+plt.xlabel("Average Updates")
+plt.ylabel("Success Rate")
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+plt.show()
+
+# Correlation between update frequency and success rate
+correlation = results_df["avg_updates"].corr(results_df["success_rate"])
+print(f"\n🔍 Correlation between average updates and success rate: {correlation:.3f}")
