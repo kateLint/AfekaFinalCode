@@ -18,12 +18,7 @@ Usage (examples)
 python logistic_regression_t_test.py --input /path/to/your.json --format json
 python logistic_regression_t_test.py --input /path/to/your.csv --format csv
 
-Notes
------
-- If your readability metrics are nested (e.g., inside "Story Analysis"), this script flattens them.
-- The script is robust to missing columns and will compute `preparation_days` and `project_length_days` if possible.
 
-Author: GP (for Keren)
 """
 
 from __future__ import annotations
