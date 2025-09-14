@@ -1,26 +1,3 @@
-#!/usr/bin/env python3
-"""
-Kickstarter: Logistic Regression + (Welch) t-tests by feature categories
-------------------------------------------------------------------------
-What this script does
-- Loads a JSON/JSONL/CSV of Kickstarter projects with the features you listed
-- Harmonizes/Flattens nested fields to match your expected feature names
-- Builds tidy DataFrame with your features + target_class in {"successful","failed"}
-- Defines feature categories: Project Engagement, Readability, Sentiment
-- Per-feature two-sample Welch t-test between successful vs failed (+ BH-FDR)
-- Fits a Statsmodels Logistic Regression (Logit) to obtain Wald z-tests, odds ratios + 95% CI
-- Computes VIF (saved) but by default DOES NOT drop features for high VIF (so all features are used)
-- Optional: predictive sanity-check with Scikit-Learn LogisticRegression via stratified CV
-- Saves clean tables to CSV under ./outputs/
-
-Usage (examples)
----------------
-python logistic_regression_t_test.py --input /path/to/your.json --format json
-python logistic_regression_t_test.py --input /path/to/your.csv --format csv
-
-
-"""
-
 from __future__ import annotations
 
 import argparse
